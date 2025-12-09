@@ -31,8 +31,9 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend"
 	backendmetrics "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend/metrics"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datalayer"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datastore"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/flowcontrol/contracts"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/handlers"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metadata"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics"
 	schedulingtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
 	errutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/error"
@@ -50,6 +51,8 @@ type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
 	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
 	PodList(predicate func(backendmetrics.PodMetrics) bool) []backendmetrics.PodMetrics
+	// ModelRewriteGet returns the rewrite rule for a given model name and the name of the InferenceModelRewrite object.
+	ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string)
 }
 
 // Scheduler defines the interface required by the Director for scheduling.
@@ -62,12 +65,14 @@ func NewDirectorWithConfig(
 	datastore Datastore,
 	scheduler Scheduler,
 	admissionController AdmissionController,
+	podLocator contracts.PodLocator,
 	config *Config,
 ) *Director {
 	return &Director{
 		datastore:             datastore,
 		scheduler:             scheduler,
 		admissionController:   admissionController,
+		podLocator:            podLocator,
 		requestControlPlugins: *config,
 		defaultPriority:       0, // define default priority explicitly
 	}
@@ -86,6 +91,7 @@ type Director struct {
 	datastore             Datastore
 	scheduler             Scheduler
 	admissionController   AdmissionController
+	podLocator            contracts.PodLocator
 	requestControlPlugins Config
 	// we just need a pointer to an int variable since priority is a pointer in InferenceObjective
 	// no need to set this in the constructor, since the value we want is the default int val
@@ -110,11 +116,16 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 	return infObjective
 }
 
-// resolveTargetModel is a helper to update reqCtx with target model based on request.
-func (d *Director) resolveTargetModel(reqCtx *handlers.RequestContext) (*handlers.RequestContext, error) {
+// HandleRequest orchestrates the request lifecycle.
+// It always returns the requestContext even in the error case, as the request context is used in error handling.
+func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext) (*handlers.RequestContext, error) {
+	logger := log.FromContext(ctx)
+
+	// Parse Request, Resolve Target Models, and Determine Parameters
 	requestBodyMap := reqCtx.Request.Body
 	var ok bool
 	reqCtx.IncomingModelName, ok = requestBodyMap["model"].(string)
+
 	if !ok {
 		return reqCtx, errutil.Error{Code: errutil.BadRequest, Msg: "model not found in request body"}
 	}
@@ -122,22 +133,11 @@ func (d *Director) resolveTargetModel(reqCtx *handlers.RequestContext) (*handler
 		// Default to incoming model name
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
+
+	d.applyWeightedModelRewrite(reqCtx)
+
 	reqCtx.Request.Body["model"] = reqCtx.TargetModelName
-	return reqCtx, nil
-}
 
-// HandleRequest orchestrates the request lifecycle.
-// It always returns the requestContext even in the error case, as the request context is used in error handling.
-func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext) (*handlers.RequestContext, error) {
-	logger := log.FromContext(ctx)
-
-	// Resolve target model and update req context.
-	reqCtx, err := d.resolveTargetModel(reqCtx)
-	if err != nil {
-		return reqCtx, err
-	}
-
-	// Parse request body.
 	requestBody, err := requtil.ExtractRequestBody(reqCtx.Request.Body)
 	if err != nil {
 		return reqCtx, errutil.Error{Code: errutil.BadRequest, Msg: fmt.Errorf("failed to extract request data: %w", err).Error()}
@@ -160,7 +160,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
 	// Get candidate pods for scheduling
-	candidatePods := d.getCandidatePodsForScheduling(ctx, reqCtx.Request.Metadata)
+	candidatePods := d.podLocator.Locate(ctx, reqCtx.Request.Metadata)
 	if len(candidatePods) == 0 {
 		return reqCtx, errutil.Error{Code: errutil.ServiceUnavailable, Msg: "failed to find candidate pods for serving the request"}
 	}
@@ -198,50 +198,41 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	return reqCtx, nil
 }
 
-// getCandidatePodsForScheduling gets the list of relevant endpoints for the scheduling cycle from the datastore.
-// according to EPP protocol, if "x-gateway-destination-endpoint-subset" is set on the request metadata and specifies
-// a subset of endpoints, only these endpoints will be considered as candidates for the scheduler.
-// Snapshot pod metrics from the datastore to:
-// 1. Reduce concurrent access to the datastore.
-// 2. Ensure consistent data during the scheduling operation of a request between all scheduling cycles.
-func (d *Director) getCandidatePodsForScheduling(ctx context.Context, requestMetadata map[string]any) []backendmetrics.PodMetrics {
-	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
+func (d *Director) applyWeightedModelRewrite(reqCtx *handlers.RequestContext) {
+	rewriteRule, modelRewriteName := d.datastore.ModelRewriteGet(reqCtx.IncomingModelName)
+	if rewriteRule == nil {
+		return
+	}
+	reqCtx.TargetModelName = d.selectWeightedModel(rewriteRule.Targets)
+	metrics.RecordInferenceModelRewriteDecision(modelRewriteName, reqCtx.IncomingModelName, reqCtx.TargetModelName)
+}
 
-	subsetMap, found := requestMetadata[metadata.SubsetFilterNamespace].(map[string]any)
-	if !found {
-		return d.datastore.PodList(backendmetrics.AllPodsPredicate)
+func (d *Director) selectWeightedModel(models []v1alpha2.TargetModel) string {
+	if len(models) == 0 {
+		return ""
 	}
 
-	// Check if endpoint key is present in the subset map and ensure there is at least one value
-	endpointSubsetList, found := subsetMap[metadata.SubsetFilterKey].([]any)
-	if !found {
-		return d.datastore.PodList(backendmetrics.AllPodsPredicate)
-	} else if len(endpointSubsetList) == 0 {
-		loggerTrace.Info("found empty subset filter in request metadata, filtering all pods")
-		return []backendmetrics.PodMetrics{}
+	var totalWeight int32
+	for _, model := range models {
+		totalWeight += model.Weight
 	}
 
-	// Create a map of endpoint addresses for easy lookup
-	endpoints := make(map[string]bool)
-	for _, endpoint := range endpointSubsetList {
-		// Extract address from endpoint
-		// The endpoint is formatted as "<address>:<port>" (ex. "10.0.1.0:8080")
-		epStr := strings.Split(endpoint.(string), ":")[0]
-		endpoints[epStr] = true
+	if totalWeight == 0 {
+		// If total weight is 0, distribute evenly
+		return models[rand.Intn(len(models))].ModelRewrite
 	}
 
-	podTotalCount := 0
-	podFilteredList := d.datastore.PodList(func(pm backendmetrics.PodMetrics) bool {
-		podTotalCount++
-		if _, found := endpoints[pm.GetPod().GetIPAddress()]; found {
-			return true
+	randomNum := rand.Intn(int(totalWeight))
+	var currentWeight int32
+	for _, model := range models {
+		currentWeight += model.Weight
+		if randomNum < int(currentWeight) {
+			return model.ModelRewrite
 		}
-		return false
-	})
+	}
 
-	loggerTrace.Info("filtered candidate pods by subset filtering", "podTotalCount", podTotalCount, "filteredCount", len(podFilteredList))
-
-	return podFilteredList
+	// Should not happen
+	return models[len(models)-1].ModelRewrite
 }
 
 // prepareRequest populates the RequestContext and calls the registered PreRequest plugins
@@ -277,9 +268,9 @@ func (d *Director) toSchedulerPodMetrics(pods []backendmetrics.PodMetrics) []sch
 	pm := make([]schedulingtypes.Pod, len(pods))
 	for i, pod := range pods {
 		if pod.GetAttributes() != nil {
-			pm[i] = &schedulingtypes.PodMetrics{Pod: pod.GetPod().Clone(), MetricsState: pod.GetMetrics().Clone(), AttributeMap: pod.GetAttributes().Clone()}
+			pm[i] = &schedulingtypes.PodMetrics{Pod: pod.GetMetadata().Clone(), MetricsState: pod.GetMetrics().Clone(), AttributeMap: pod.GetAttributes().Clone()}
 		} else {
-			pm[i] = &schedulingtypes.PodMetrics{Pod: pod.GetPod().Clone(), MetricsState: pod.GetMetrics().Clone(), AttributeMap: datalayer.NewAttributes()}
+			pm[i] = &schedulingtypes.PodMetrics{Pod: pod.GetMetadata().Clone(), MetricsState: pod.GetMetrics().Clone(), AttributeMap: datalayer.NewAttributes()}
 		}
 	}
 
@@ -331,13 +322,13 @@ func (d *Director) HandleResponseBodyComplete(ctx context.Context, reqCtx *handl
 }
 
 func (d *Director) GetRandomPod() *backend.Pod {
-	pods := d.datastore.PodList(backendmetrics.AllPodsPredicate)
+	pods := d.datastore.PodList(datastore.AllPodsPredicate)
 	if len(pods) == 0 {
 		return nil
 	}
 	number := rand.Intn(len(pods))
 	pod := pods[number]
-	return pod.GetPod()
+	return pod.GetMetadata()
 }
 
 func (d *Director) runPreRequestPlugins(ctx context.Context, request *schedulingtypes.LLMRequest,

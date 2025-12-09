@@ -90,6 +90,8 @@ const (
 	// Model Names
 	modelMyModel         = "my-model"
 	modelMyModelTarget   = "my-model-12345"
+	modelToBeWritten     = "model-to-be-rewritten"
+	modelAfterRewrite    = "rewritten-model"
 	modelSQLLora         = "sql-lora"
 	modelSQLLoraTarget   = "sql-lora-1fdg2"
 	modelSheddable       = "sql-lora-sheddable"
@@ -226,7 +228,7 @@ func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 			wantErr: false,
 			wantResponses: integrationutils.NewImmediateErrorResponse(
 				envoyTypePb.StatusCode_BadRequest,
-				"inference gateway: BadRequest - Error unmarshaling request body",
+				"inference gateway: BadRequest - Error unmarshaling request body: no healthy upstream",
 			),
 		},
 		{
@@ -981,6 +983,42 @@ func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:     "rewrite request model",
+			requests: integrationutils.GenerateStreamedRequestSet(logger, "test-rewrite", modelToBeWritten, modelToBeWritten, nil),
+			// Pod 0 will be picked.
+			// Expected flow:
+			// 1. Request asks for "model-to-be-rewritten"
+			// 2. Rewrite rule transforms "model-to-be-rewritten" -> "rewritten-model"
+			// 3. EPP sends request to backend with model "rewritten-model"
+			pods: newPodStates(
+				podState{index: 0, queueSize: 0, kvCacheUsage: 0.1, activeModels: []string{"foo", "rewritten-model"}},
+			),
+			wantMetrics: map[string]string{
+				"inference_objective_request_total": inferenceObjectiveRequestTotal([]label{
+					{"model_name", modelToBeWritten},
+					{"target_model_name", modelAfterRewrite},
+				}),
+			},
+			wantErr: false,
+			wantResponses: integrationutils.NewRequestBufferedResponse(
+				"192.168.1.1:8000",
+				// Note: The prompt remains "test-rewrite", but the model in the JSON body is updated to the *rewritten target* model.
+				fmt.Sprintf(`{"max_tokens":100,"model":%q,"prompt":"test-rewrite","temperature":0}`, modelAfterRewrite),
+				&configPb.HeaderValueOption{
+					Header: &configPb.HeaderValue{
+						Key:      "hi",
+						RawValue: []byte("mom"),
+					},
+				},
+				&configPb.HeaderValueOption{
+					Header: &configPb.HeaderValue{
+						Key:      requtil.RequestIdHeaderKey,
+						RawValue: []byte("test-request-id"),
+					},
+				},
+			),
+		},
 	}
 
 	for _, test := range tests {
@@ -1058,7 +1096,7 @@ func setUpHermeticServer(t *testing.T, podAndMetrics map[*backend.Pod]*backendme
 
 	// check if all pods are synced to datastore
 	assert.EventuallyWithT(t, func(t *assert.CollectT) {
-		assert.Len(t, serverRunner.Datastore.PodList(backendmetrics.AllPodsPredicate), len(podAndMetrics), "Datastore not synced")
+		assert.Len(t, serverRunner.Datastore.PodList(datastore.AllPodsPredicate), len(podAndMetrics), "Datastore not synced")
 	}, 10*time.Second, time.Second)
 
 	// Create a grpc connection
@@ -1203,7 +1241,15 @@ func BeforeSuite() func() {
 	detector := saturationdetector.NewDetector(sdConfig, logger.WithName("saturation-detector"))
 	serverRunner.SaturationDetector = detector
 	admissionController := requestcontrol.NewLegacyAdmissionController(detector)
-	serverRunner.Director = requestcontrol.NewDirectorWithConfig(serverRunner.Datastore, scheduler, admissionController, requestcontrol.NewConfig())
+	locator := requestcontrol.NewDatastorePodLocator(serverRunner.Datastore)
+	cachedLocator := requestcontrol.NewCachedPodLocator(context.Background(), locator, time.Millisecond*50)
+	serverRunner.Director = requestcontrol.NewDirectorWithConfig(
+		serverRunner.Datastore,
+		scheduler,
+		admissionController,
+		cachedLocator,
+		requestcontrol.NewConfig(),
+	)
 	serverRunner.SecureServing = false
 
 	if err := serverRunner.SetupWithManager(context.Background(), mgr); err != nil {
@@ -1247,6 +1293,7 @@ func BeforeSuite() func() {
 		_ = testEnv.Stop()
 		_ = k8sClient.DeleteAllOf(context.Background(), &v1.InferencePool{})
 		_ = k8sClient.DeleteAllOf(context.Background(), &v1alpha2.InferenceObjective{})
+		_ = k8sClient.DeleteAllOf(context.Background(), &v1alpha2.InferenceModelRewrite{})
 	}
 }
 
@@ -1295,6 +1342,11 @@ func managerTestOptions(namespace, name string, metricsServerOptions metricsserv
 					},
 				},
 				&v1alpha2.InferenceObjective{}: {
+					Namespaces: map[string]cache.Config{
+						namespace: {},
+					},
+				},
+				&v1alpha2.InferenceModelRewrite{}: {
 					Namespaces: map[string]cache.Config{
 						namespace: {},
 					},

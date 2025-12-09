@@ -21,11 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,7 +41,6 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datalayer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datastore"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/handlers"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metadata"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 	schedulingtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
 	errutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/error"
@@ -87,7 +86,8 @@ func (m *mockScheduler) Schedule(_ context.Context, _ *schedulingtypes.LLMReques
 }
 
 type mockDatastore struct {
-	pods []backendmetrics.PodMetrics
+	pods     []backendmetrics.PodMetrics
+	rewrites []*v1alpha2.InferenceModelRewrite
 }
 
 func (ds *mockDatastore) PoolGet() (*datalayer.EndpointPool, error) {
@@ -139,19 +139,19 @@ func newMockPrepareDataPlugin(name string) *mockPrepareDataPlugin {
 }
 
 type mockAdmissionPlugin struct {
-	tn          plugins.TypedName
+	typedName   plugins.TypedName
 	denialError error
 }
 
 func newMockAdmissionPlugin(name string, denialError error) *mockAdmissionPlugin {
 	return &mockAdmissionPlugin{
-		tn:          plugins.TypedName{Type: "mock-admit-data", Name: name},
+		typedName:   plugins.TypedName{Type: "mock-admit-data", Name: name},
 		denialError: denialError,
 	}
 }
 
 func (m *mockAdmissionPlugin) TypedName() plugins.TypedName {
-	return m.tn
+	return m.typedName
 }
 
 func (m *mockAdmissionPlugin) AdmitRequest(ctx context.Context, request *schedulingtypes.LLMRequest, pods []schedulingtypes.Pod) error {
@@ -167,6 +167,34 @@ func (m mockProducedDataType) Clone() datalayer.Cloneable {
 	return mockProducedDataType{value: m.value}
 }
 
+func (ds *mockDatastore) ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string) {
+	// This mock implementation simulates the precedence logic for simplicity.
+	// It finds the oldest rewrite that has a rule matching the modelName.
+	var matchingRewrites []*v1alpha2.InferenceModelRewrite
+	for _, r := range ds.rewrites {
+		for _, rule := range r.Spec.Rules {
+			for _, match := range rule.Matches {
+				if match.Model != nil && match.Model.Value == modelName {
+					matchingRewrites = append(matchingRewrites, r)
+					break // break inner loop
+				}
+			}
+		}
+	}
+
+	if len(matchingRewrites) == 0 {
+		return nil, ""
+	}
+
+	// Sort by timestamp to find the oldest.
+	sort.Slice(matchingRewrites, func(i, j int) bool {
+		return matchingRewrites[i].CreationTimestamp.Before(&matchingRewrites[j].CreationTimestamp)
+	})
+
+	// Return the first rule from the oldest rewrite.
+	return &matchingRewrites[0].Spec.Rules[0], matchingRewrites[0].Name
+}
+
 func TestDirector_HandleRequest(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 
@@ -174,6 +202,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 	model := "food-review"
 	modelSheddable := "food-review-sheddable"
 	modelWithResolvedTarget := "food-review-resolve"
+	modelToBeRewritten := "food-review-to-be-rewritten"
+	modelRewritten := "food-review-rewritten"
 
 	objectiveName := "ioFoodReview"
 	objectiveNameSheddable := "imFoodReviewSheddable"
@@ -191,6 +221,33 @@ func TestDirector_HandleRequest(t *testing.T) {
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(1).
 		ObjRef()
+
+	rewrite := &v1alpha2.InferenceModelRewrite{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "rewrite-rule",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1alpha2.InferenceModelRewriteSpec{
+			Rules: []v1alpha2.InferenceModelRewriteRule{
+				{
+					Matches: []v1alpha2.Match{
+						{
+							Model: &v1alpha2.ModelMatch{
+								Value: modelToBeRewritten,
+							},
+						},
+					},
+					Targets: []v1alpha2.TargetModel{
+						{
+							ModelRewrite: modelRewritten,
+							Weight:       100,
+						},
+					},
+				},
+			},
+		},
+	}
+
 	pool := &v1.InferencePool{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
 		Spec: v1.InferencePoolSpec{
@@ -201,38 +258,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 				},
 			},
 		},
-	}
-
-	// Datastore setup
-	pmf := backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, time.Second)
-	ds := datastore.NewDatastore(t.Context(), pmf, 0)
-	ds.ObjectiveSet(ioFoodReview)
-	ds.ObjectiveSet(ioFoodReviewResolve)
-	ds.ObjectiveSet(ioFoodReviewSheddable)
-
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)); err != nil {
-		t.Fatalf("Error while setting inference pool: %v", err)
-	}
-
-	for i := range 5 {
-		// Pod setup
-		testPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("pod%v", i+1),
-				Namespace: "default",
-				Labels:    map[string]string{"app": "inference"},
-			},
-			Status: corev1.PodStatus{
-				PodIP:      fmt.Sprintf("192.168.%v.100", i+1),
-				Phase:      corev1.PodRunning,
-				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
-			},
-		}
-		ds.PodUpdateOrAddIfNotExist(testPod)
 	}
 
 	defaultSuccessfulScheduleResults := &schedulingtypes.SchedulingResult{
@@ -284,6 +309,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		mockAdmissionController *mockAdmissionController
 		inferenceObjectiveName  string
 		schedulerMockSetup      func(m *mockScheduler)
+		initialTargetModelName  string                   // Initial target model in the reqCtx.
 		wantErrCode             string                   // Expected errutil code string
 		wantReqCtx              *handlers.RequestContext // Fields to check in the returned RequestContext
 		wantMutatedBodyModel    string                   // Expected model in reqCtx.Request.Body after PostDispatch
@@ -301,6 +327,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			schedulerMockSetup: func(m *mockScheduler) {
 				m.scheduleResults = defaultSuccessfulScheduleResults
 			},
+			initialTargetModelName: model,
 			wantReqCtx: &handlers.RequestContext{
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
@@ -314,9 +341,31 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			wantMutatedBodyModel:   model,
 			inferenceObjectiveName: objectiveName,
-			targetModelName:        model,
-		},
-		{
+		}, {
+			name: "successful request with model rewrite",
+			reqBodyMap: map[string]any{
+				"model":  modelToBeRewritten,
+				"prompt": "some prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    model,
+				TargetModelName: modelRewritten,
+				TargetPod: &backend.Pod{
+					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:        "192.168.1.100",
+					Port:           "8000",
+					MetricsHost:    "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantMutatedBodyModel:   modelRewritten,
+			inferenceObjectiveName: model,
+		}, {
 			name: "successful chat completions request",
 			reqBodyMap: map[string]any{
 				"model": model,
@@ -331,6 +380,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			schedulerMockSetup: func(m *mockScheduler) {
 				m.scheduleResults = defaultSuccessfulScheduleResults
 			},
+			initialTargetModelName: model,
 			wantReqCtx: &handlers.RequestContext{
 				TargetModelName: model,
 				TargetPod: &backend.Pod{
@@ -442,6 +492,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			schedulerMockSetup: func(m *mockScheduler) {
 				m.scheduleResults = defaultSuccessfulScheduleResults
 			},
+			initialTargetModelName: model,
 			wantReqCtx: &handlers.RequestContext{
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
@@ -453,11 +504,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
-			wantMutatedBodyModel:   model,
 			inferenceObjectiveName: objectiveName,
-			targetModelName:        model,
-		},
-		{
+		}, {
 			name: "successful request with target model resolution",
 			reqBodyMap: map[string]any{
 				"model":  modelWithResolvedTarget,
@@ -467,6 +515,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			schedulerMockSetup: func(m *mockScheduler) {
 				m.scheduleResults = defaultSuccessfulScheduleResults
 			},
+			initialTargetModelName: "resolved-target-model-A",
 			wantReqCtx: &handlers.RequestContext{
 				ObjectiveKey:    objectiveNameResolve,
 				TargetModelName: "resolved-target-model-A",
@@ -480,13 +529,13 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			wantMutatedBodyModel:   "resolved-target-model-A",
 			inferenceObjectiveName: objectiveNameResolve,
-			targetModelName:        "resolved-target-model-A",
 		},
 		{
 			name: "nonexistent target defined, use default inference model",
 			schedulerMockSetup: func(m *mockScheduler) {
 				m.scheduleResults = defaultSuccessfulScheduleResults
 			},
+			initialTargetModelName: "food-review-1",
 			wantReqCtx: &handlers.RequestContext{
 				ObjectiveKey:    "food-review-1",
 				TargetModelName: "food-review-1",
@@ -505,10 +554,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			inferenceObjectiveName:  "food-review-1",
-			targetModelName:         "food-review-1",
 		},
 		{
-
 			name: "request rejected by admission controller",
 			reqBodyMap: map[string]any{
 				"model":  modelSheddable,
@@ -566,145 +613,108 @@ func TestDirector_HandleRequest(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			mockSched := &mockScheduler{}
-			if test.schedulerMockSetup != nil {
-				test.schedulerMockSetup(mockSched)
-			}
-			config := NewConfig()
-			if test.prepareDataPlugin != nil {
-				config = config.WithPrepareDataPlugins(test.prepareDataPlugin)
-			}
-			config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
-			director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, config)
-
-			reqCtx := &handlers.RequestContext{
-				Request: &handlers.Request{
-					// Create a copy of the map for each test run to avoid mutation issues.
-					Body: make(map[string]any),
-					Headers: map[string]string{
-						requtil.RequestIdHeaderKey: "test-req-id-" + test.name, // Ensure a default request ID
-					},
-				},
-				ObjectiveKey:    test.inferenceObjectiveName,
-				TargetModelName: test.targetModelName,
-			}
-			// Deep copy the body map.
-			maps.Copy(reqCtx.Request.Body, test.reqBodyMap)
-
-			returnedReqCtx, err := director.HandleRequest(ctx, reqCtx)
-
-			if test.wantErrCode != "" {
-				assert.Error(t, err, "HandleRequest() should have returned an error")
-				var e errutil.Error
-				if assert.ErrorAs(t, err, &e, "Error should be of type errutil.Error") {
-					assert.Equal(t, test.wantErrCode, e.Code, "Error code mismatch")
-				}
-				return
-			}
-
-			assert.NoError(t, err, "HandleRequest() returned unexpected error")
-
-			if test.wantReqCtx != nil {
-				assert.Equal(t, test.wantReqCtx.ObjectiveKey, returnedReqCtx.ObjectiveKey, "reqCtx.Model mismatch")
-				assert.Equal(t, test.wantReqCtx.TargetModelName, returnedReqCtx.TargetModelName,
-					"reqCtx.ResolvedTargetModel mismatch")
-				assert.Equal(t, test.wantReqCtx.TargetPod, returnedReqCtx.TargetPod, "reqCtx.TargetPod mismatch")
-				assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
-			}
-
-			if test.wantMutatedBodyModel != "" {
-				assert.NotNil(t, returnedReqCtx.Request.Body, "Expected mutated body, but reqCtx.Request.Body is nil")
-				assert.Equal(t, test.wantMutatedBodyModel, returnedReqCtx.Request.Body["model"],
-					"Mutated reqCtx.Request.Body model mismatch")
-			}
-		})
+	period := time.Second
+	factories := []datalayer.EndpointFactory{
+		backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
+		datalayer.NewEndpointFactory([]datalayer.DataSource{&datalayer.FakeDataSource{}}, period),
 	}
-}
+	for _, epf := range factories {
+		// Datastore setup
+		ds := datastore.NewDatastore(t.Context(), epf, 0)
+		ds.ObjectiveSet(ioFoodReview)
+		ds.ObjectiveSet(ioFoodReviewResolve)
+		ds.ObjectiveSet(ioFoodReviewSheddable)
+		ds.ModelRewriteSet(rewrite)
 
-// TestGetCandidatePodsForScheduling is testing getCandidatePodsForScheduling and more specifically the functionality of SubsetFilter.
-func TestGetCandidatePodsForScheduling(t *testing.T) {
-	var makeFilterMetadata = func(data []any) map[string]any {
-		return map[string]any{
-			metadata.SubsetFilterNamespace: map[string]any{
-				metadata.SubsetFilterKey: data,
-			},
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)); err != nil {
+			t.Fatalf("Error while setting inference pool: %v", err)
 		}
-	}
 
-	pod1 := &backend.Pod{
-		NamespacedName: types.NamespacedName{Name: "pod1"},
-		Address:        "10.0.0.1",
-		Labels:         map[string]string{},
-	}
-
-	pod2 := &backend.Pod{
-		NamespacedName: types.NamespacedName{Name: "pod2"},
-		Address:        "10.0.0.2",
-		Labels:         map[string]string{},
-	}
-
-	testInput := []backendmetrics.PodMetrics{
-		&backendmetrics.FakePodMetrics{Pod: pod1},
-		&backendmetrics.FakePodMetrics{Pod: pod2},
-	}
-
-	tests := []struct {
-		name     string
-		metadata map[string]any
-		output   []backendmetrics.PodMetrics
-	}{
-		{
-			name:     "SubsetFilter, filter not present — return all pods",
-			metadata: map[string]any{},
-			output:   testInput,
-		},
-		{
-			name:     "SubsetFilter, namespace present filter not present — return all pods",
-			metadata: map[string]any{metadata.SubsetFilterNamespace: map[string]any{}},
-			output:   testInput,
-		},
-		{
-			name:     "SubsetFilter, filter present with empty list — return error",
-			metadata: makeFilterMetadata([]any{}),
-			output:   []backendmetrics.PodMetrics{},
-		},
-		{
-			name:     "SubsetFilter, subset with one matching pod",
-			metadata: makeFilterMetadata([]any{"10.0.0.1"}),
-			output: []backendmetrics.PodMetrics{
-				&backendmetrics.FakePodMetrics{
-					Pod: pod1,
+		for i := range 5 {
+			// Pod setup
+			testPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("pod%v", i+1),
+					Namespace: "default",
+					Labels:    map[string]string{"app": "inference"},
 				},
-			},
-		},
-		{
-			name:     "SubsetFilter, subset with multiple matching pods",
-			metadata: makeFilterMetadata([]any{"10.0.0.1", "10.0.0.2", "10.0.0.3"}),
-			output:   testInput,
-		},
-		{
-			name:     "SubsetFilter, subset with no matching pods",
-			metadata: makeFilterMetadata([]any{"10.0.0.3"}),
-			output:   []backendmetrics.PodMetrics{},
-		},
-	}
-
-	ds := &mockDatastore{pods: testInput}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			director := NewDirectorWithConfig(ds, &mockScheduler{}, &mockAdmissionController{}, NewConfig())
-
-			got := director.getCandidatePodsForScheduling(context.Background(), test.metadata)
-
-			diff := cmp.Diff(test.output, got, cmpopts.SortSlices(func(a, b backendmetrics.PodMetrics) bool {
-				return a.GetPod().NamespacedName.String() < b.GetPod().NamespacedName.String()
-			}))
-			if diff != "" {
-				t.Errorf("Unexpected output (-want +got): %v", diff)
+				Status: corev1.PodStatus{
+					PodIP:      fmt.Sprintf("192.168.%v.100", i+1),
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				},
 			}
-		})
+			ds.PodUpdateOrAddIfNotExist(testPod)
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				mockSched := &mockScheduler{}
+				if test.schedulerMockSetup != nil {
+					test.schedulerMockSetup(mockSched)
+				}
+				config := NewConfig()
+				if test.prepareDataPlugin != nil {
+					config = config.WithPrepareDataPlugins(test.prepareDataPlugin)
+				}
+				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
+
+				locator := NewCachedPodLocator(context.Background(), NewDatastorePodLocator(ds), time.Minute)
+				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, locator, config)
+				if test.name == "successful request with model rewrite" {
+					mockDs := &mockDatastore{
+						pods:     ds.PodList(datastore.AllPodsPredicate),
+						rewrites: []*v1alpha2.InferenceModelRewrite{rewrite},
+					}
+					director.datastore = mockDs
+					director.podLocator = NewCachedPodLocator(context.Background(), NewDatastorePodLocator(mockDs), time.Minute)
+				}
+				reqCtx := &handlers.RequestContext{
+					Request: &handlers.Request{
+						// Create a copy of the map for each test run to avoid mutation issues.
+						Body: make(map[string]any),
+						Headers: map[string]string{
+							requtil.RequestIdHeaderKey: "test-req-id-" + test.name, // Ensure a default request ID
+						},
+					},
+					ObjectiveKey:    test.inferenceObjectiveName,
+					TargetModelName: test.initialTargetModelName,
+				}
+				// Deep copy the body map.
+				maps.Copy(reqCtx.Request.Body, test.reqBodyMap)
+
+				returnedReqCtx, err := director.HandleRequest(ctx, reqCtx)
+
+				if test.wantErrCode != "" {
+					assert.Error(t, err, "HandleRequest() should have returned an error")
+					var e errutil.Error
+					if assert.ErrorAs(t, err, &e, "Error should be of type errutil.Error") {
+						assert.Equal(t, test.wantErrCode, e.Code, "Error code mismatch")
+					}
+					return
+				}
+
+				assert.NoError(t, err, "HandleRequest() returned unexpected error")
+
+				if test.wantReqCtx != nil {
+					assert.Equal(t, test.wantReqCtx.ObjectiveKey, returnedReqCtx.ObjectiveKey, "reqCtx.Model mismatch")
+					assert.Equal(t, test.wantReqCtx.TargetModelName, returnedReqCtx.TargetModelName,
+						"reqCtx.ResolvedTargetModel mismatch")
+					assert.Equal(t, test.wantReqCtx.TargetPod, returnedReqCtx.TargetPod, "reqCtx.TargetPod mismatch")
+					assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
+				}
+
+				if test.wantMutatedBodyModel != "" {
+					assert.NotNil(t, returnedReqCtx.Request.Body, "Expected mutated body, but reqCtx.Request.Body is nil")
+					assert.Equal(t, test.wantMutatedBodyModel, returnedReqCtx.Request.Body["model"],
+						"Mutated reqCtx.Request.Body model mismatch")
+				}
+			})
+		}
 	}
 }
 
@@ -753,25 +763,292 @@ func TestGetRandomPod(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			pmf := backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, time.Millisecond)
-			endpointPool := poolutil.InferencePoolToEndpointPool(pool)
-			ds := datastore.NewDatastore(t.Context(), pmf, 0)
-			err := ds.PoolSet(t.Context(), fakeClient, endpointPool)
-			if err != nil {
-				t.Errorf("unexpected error setting pool: %s", err)
-			}
-			for _, pod := range test.storePods {
-				ds.PodUpdateOrAddIfNotExist(pod)
-			}
-			d := &Director{datastore: ds}
-			gotPod := d.GetRandomPod()
+		period := time.Millisecond
+		factories := []datalayer.EndpointFactory{
+			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
+			datalayer.NewEndpointFactory([]datalayer.DataSource{&datalayer.FakeDataSource{}}, period),
+		}
+		for _, epf := range factories {
+			t.Run(test.name, func(t *testing.T) {
+				endpointPool := poolutil.InferencePoolToEndpointPool(pool)
+				ds := datastore.NewDatastore(t.Context(), epf, 0)
+				err := ds.PoolSet(t.Context(), fakeClient, endpointPool)
+				if err != nil {
+					t.Errorf("unexpected error setting pool: %s", err)
+				}
+				for _, pod := range test.storePods {
+					ds.PodUpdateOrAddIfNotExist(pod)
+				}
+				d := &Director{datastore: ds}
+				gotPod := d.GetRandomPod()
 
-			if test.expectNil && gotPod != nil {
-				t.Errorf("expected nil pod, got: %v", gotPod)
+				if test.expectNil && gotPod != nil {
+					t.Errorf("expected nil pod, got: %v", gotPod)
+				}
+				if !test.expectNil && gotPod == nil {
+					t.Errorf("expected non-nil pod, got nil")
+				}
+			})
+		}
+	}
+}
+
+func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
+	_ = logutil.NewTestLoggerIntoContext(context.Background())
+
+	// Mock InferenceModelRewrite objects
+	rewriteOld := &v1alpha2.InferenceModelRewrite{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "rewrite-old",
+			CreationTimestamp: metav1.Unix(1000, 0),
+		},
+		Spec: v1alpha2.InferenceModelRewriteSpec{
+			Rules: []v1alpha2.InferenceModelRewriteRule{
+				{
+					Matches: []v1alpha2.Match{
+						{
+							Model: &v1alpha2.ModelMatch{
+								Value: "model-a",
+							},
+						},
+					},
+					Targets: []v1alpha2.TargetModel{
+						{
+							ModelRewrite: "model-a-old-tuned",
+							Weight:       100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	rewriteNew := &v1alpha2.InferenceModelRewrite{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "rewrite-new",
+			CreationTimestamp: metav1.Unix(2000, 0),
+		},
+		Spec: v1alpha2.InferenceModelRewriteSpec{
+			Rules: []v1alpha2.InferenceModelRewriteRule{
+				{
+					Matches: []v1alpha2.Match{
+						{
+							Model: &v1alpha2.ModelMatch{
+								Value: "model-a",
+							},
+						},
+					},
+					Targets: []v1alpha2.TargetModel{
+						{
+							ModelRewrite: "model-a-new-tuned",
+							Weight:       100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	rewriteB := &v1alpha2.InferenceModelRewrite{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "rewrite-b",
+			CreationTimestamp: metav1.Unix(1500, 0),
+		},
+		Spec: v1alpha2.InferenceModelRewriteSpec{
+			Rules: []v1alpha2.InferenceModelRewriteRule{
+				{
+					Matches: []v1alpha2.Match{
+						{
+							Model: &v1alpha2.ModelMatch{
+								Value: "model-b",
+							},
+						},
+					},
+					Targets: []v1alpha2.TargetModel{
+						{
+							ModelRewrite: "model-b-tuned",
+							Weight:       100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	rewriteWeighted := &v1alpha2.InferenceModelRewrite{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "rewrite-weighted",
+			CreationTimestamp: metav1.Unix(1200, 0),
+		},
+		Spec: v1alpha2.InferenceModelRewriteSpec{
+			Rules: []v1alpha2.InferenceModelRewriteRule{
+				{
+					Matches: []v1alpha2.Match{
+						{
+							Model: &v1alpha2.ModelMatch{
+								Value: "model-c",
+							},
+						},
+					},
+					Targets: []v1alpha2.TargetModel{
+						{
+							ModelRewrite: "model-c-v1",
+							Weight:       70,
+						},
+						{
+							ModelRewrite: "model-c-v2",
+							Weight:       30,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		rewrites       []*v1alpha2.InferenceModelRewrite
+		incomingModel  string
+		expectedTarget []string
+		initialTarget  string // Initial value of reqCtx.TargetModelName
+	}{
+		{
+			name:           "no rewrites",
+			rewrites:       []*v1alpha2.InferenceModelRewrite{},
+			incomingModel:  "model-x",
+			expectedTarget: []string{"model-x"},
+			initialTarget:  "model-x",
+		},
+		{
+			name:           "single matching rewrite",
+			rewrites:       []*v1alpha2.InferenceModelRewrite{rewriteB},
+			incomingModel:  "model-b",
+			expectedTarget: []string{"model-b-tuned"},
+			initialTarget:  "model-b",
+		},
+		{
+			name:           "no matching rewrite",
+			rewrites:       []*v1alpha2.InferenceModelRewrite{rewriteB},
+			incomingModel:  "model-x",
+			expectedTarget: []string{"model-x"},
+			initialTarget:  "model-x",
+		},
+		{
+			name:           "oldest rewrite wins for duplicate model",
+			rewrites:       []*v1alpha2.InferenceModelRewrite{rewriteNew, rewriteOld}, // New is first, but Old has older timestamp
+			incomingModel:  "model-a",
+			expectedTarget: []string{"model-a-old-tuned"},
+			initialTarget:  "model-a",
+		},
+		{
+			name:           "weighted rewrite applied (probabilistic check)",
+			rewrites:       []*v1alpha2.InferenceModelRewrite{rewriteWeighted},
+			incomingModel:  "model-c",
+			initialTarget:  "model-c",
+			expectedTarget: []string{"model-c-v1", "model-c-v2"},
+		},
+		{
+			name:           "initial TargetModelName is respected if no rewrite matches",
+			rewrites:       []*v1alpha2.InferenceModelRewrite{rewriteB},
+			incomingModel:  "model-x",
+			initialTarget:  "pre-existing-target",
+			expectedTarget: []string{"pre-existing-target"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mockDs := &mockDatastore{rewrites: test.rewrites}
+			locator := NewCachedPodLocator(context.Background(), NewDatastorePodLocator(mockDs), time.Minute)
+			director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, locator, NewConfig())
+
+			reqCtx := &handlers.RequestContext{
+				IncomingModelName: test.incomingModel,
+				TargetModelName:   test.initialTarget,
 			}
-			if !test.expectNil && gotPod == nil {
-				t.Errorf("expected non-nil pod, got nil")
+
+			director.applyWeightedModelRewrite(reqCtx)
+			assert.Contains(t, test.expectedTarget, reqCtx.TargetModelName, "TargetModelName mismatch")
+		})
+	}
+}
+
+func TestDirector_SelectWeightedModel(t *testing.T) {
+	tests := []struct {
+		name           string
+		targets        []v1alpha2.TargetModel
+		possibleModels map[string]bool // For probabilistic cases
+	}{
+		{
+			name: "single target",
+			targets: []v1alpha2.TargetModel{
+				{ModelRewrite: "model-a", Weight: 100},
+			},
+			possibleModels: map[string]bool{"model-a": true},
+		},
+		{
+			name: "multiple targets, equal weight",
+			targets: []v1alpha2.TargetModel{
+				{ModelRewrite: "model-a", Weight: 50},
+				{ModelRewrite: "model-b", Weight: 50},
+			},
+			possibleModels: map[string]bool{"model-a": true, "model-b": true},
+		},
+		{
+			name: "multiple targets, different weights",
+			targets: []v1alpha2.TargetModel{
+				{ModelRewrite: "model-x", Weight: 70},
+				{ModelRewrite: "model-y", Weight: 30},
+			},
+			possibleModels: map[string]bool{"model-x": true, "model-y": true},
+		},
+		{
+			name: "zero total weight, distribute evenly",
+			targets: []v1alpha2.TargetModel{
+				{ModelRewrite: "model-z1", Weight: 0},
+				{ModelRewrite: "model-z2", Weight: 0},
+			},
+			possibleModels: map[string]bool{"model-z1": true, "model-z2": true},
+		},
+	}
+
+	director := &Director{}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Run multiple times to check distribution
+			counter := make(map[string]int)
+			numRuns := 1000
+			for i := 0; i < numRuns; i++ {
+				selected := director.selectWeightedModel(test.targets)
+				counter[selected]++
+			}
+
+			// Assert that all selected models are within the possible models
+			for model := range counter {
+				if _, ok := test.possibleModels[model]; !ok {
+					t.Errorf("Selected model %s is not in possible models %v", model, test.possibleModels)
+				}
+			}
+
+			// Basic check for distribution (e.g., if 70/30, expect roughly 700/300)
+			if len(test.targets) > 1 {
+				totalWeight := int32(0)
+				for _, target := range test.targets {
+					totalWeight += target.Weight
+				}
+
+				if totalWeight == 0 { // Special case for zero total weight
+					for _, target := range test.targets {
+						expectedCount := numRuns / len(test.targets)
+						assert.InDelta(t, expectedCount, counter[target.ModelRewrite], float64(numRuns)/float64(len(test.targets))*0.2, "Distribution for %s is off", target.ModelRewrite)
+					}
+				} else {
+					for _, target := range test.targets {
+						expectedCount := float64(numRuns) * (float64(target.Weight) / float64(totalWeight))
+						assert.InDelta(t, expectedCount, float64(counter[target.ModelRewrite]), expectedCount*0.2, "Distribution for %s is off", target.ModelRewrite)
+					}
+				}
 			}
 		})
 	}
@@ -783,7 +1060,14 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	ds := datastore.NewDatastore(t.Context(), nil, 0)
 	mockSched := &mockScheduler{}
-	director := NewDirectorWithConfig(ds, mockSched, &mockAdmissionController{}, NewConfig().WithResponseReceivedPlugins(pr1))
+	locator := NewCachedPodLocator(context.Background(), NewDatastorePodLocator(ds), time.Minute)
+	director := NewDirectorWithConfig(
+		ds,
+		mockSched,
+		&mockAdmissionController{},
+		locator,
+		NewConfig().WithResponseReceivedPlugins(pr1),
+	)
 
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
@@ -820,7 +1104,8 @@ func TestDirector_HandleResponseStreaming(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	ds := datastore.NewDatastore(t.Context(), nil, 0)
 	mockSched := &mockScheduler{}
-	director := NewDirectorWithConfig(ds, mockSched, nil, NewConfig().WithResponseStreamingPlugins(ps1))
+	locator := NewCachedPodLocator(context.Background(), NewDatastorePodLocator(ds), time.Minute)
+	director := NewDirectorWithConfig(ds, mockSched, nil, locator, NewConfig().WithResponseStreamingPlugins(ps1))
 
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
@@ -856,7 +1141,8 @@ func TestDirector_HandleResponseComplete(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	ds := datastore.NewDatastore(t.Context(), nil, 0)
 	mockSched := &mockScheduler{}
-	director := NewDirectorWithConfig(ds, mockSched, nil, NewConfig().WithResponseCompletePlugins(pc1))
+	locator := NewCachedPodLocator(context.Background(), NewDatastorePodLocator(ds), time.Minute)
+	director := NewDirectorWithConfig(ds, mockSched, nil, locator, NewConfig().WithResponseCompletePlugins(pc1))
 
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
@@ -893,51 +1179,51 @@ const (
 )
 
 type testResponseReceived struct {
-	tn                      plugins.TypedName
+	typedName               plugins.TypedName
 	lastRespOnResponse      *Response
 	lastTargetPodOnResponse string
 }
 
 type testResponseStreaming struct {
-	tn                       plugins.TypedName
+	typedName                plugins.TypedName
 	lastRespOnStreaming      *Response
 	lastTargetPodOnStreaming string
 }
 
 type testResponseComplete struct {
-	tn                      plugins.TypedName
+	typedName               plugins.TypedName
 	lastRespOnComplete      *Response
 	lastTargetPodOnComplete string
 }
 
 func newTestResponseReceived(name string) *testResponseReceived {
 	return &testResponseReceived{
-		tn: plugins.TypedName{Type: testResponseReceivedType, Name: name},
+		typedName: plugins.TypedName{Type: testResponseReceivedType, Name: name},
 	}
 }
 
 func newTestResponseStreaming(name string) *testResponseStreaming {
 	return &testResponseStreaming{
-		tn: plugins.TypedName{Type: testPostStreamingType, Name: name},
+		typedName: plugins.TypedName{Type: testPostStreamingType, Name: name},
 	}
 }
 
 func newTestResponseComplete(name string) *testResponseComplete {
 	return &testResponseComplete{
-		tn: plugins.TypedName{Type: testPostCompleteType, Name: name},
+		typedName: plugins.TypedName{Type: testPostCompleteType, Name: name},
 	}
 }
 
 func (p *testResponseReceived) TypedName() plugins.TypedName {
-	return p.tn
+	return p.typedName
 }
 
 func (p *testResponseStreaming) TypedName() plugins.TypedName {
-	return p.tn
+	return p.typedName
 }
 
 func (p *testResponseComplete) TypedName() plugins.TypedName {
-	return p.tn
+	return p.typedName
 }
 
 func (p *testResponseReceived) ResponseReceived(_ context.Context, _ *schedulingtypes.LLMRequest, response *Response, targetPod *backend.Pod) {

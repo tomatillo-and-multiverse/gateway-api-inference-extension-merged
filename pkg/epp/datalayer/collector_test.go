@@ -31,27 +31,15 @@ import (
 
 // --- Test Stubs ---
 
-type DummySource struct {
-	callCount int64
-}
-
-func (d *DummySource) Name() string                   { return "test-dummy-data-source" }
-func (d *DummySource) Extractors() []string           { return []string{} }
-func (d *DummySource) AddExtractor(_ Extractor) error { return nil }
-func (d *DummySource) Collect(ctx context.Context, ep Endpoint) error {
-	atomic.AddInt64(&d.callCount, 1)
-	return nil
-}
-
 func defaultEndpoint() Endpoint {
-	pod := &PodInfo{
+	meta := &EndpointMetadata{
 		NamespacedName: types.NamespacedName{
 			Name:      "pod-name",
 			Namespace: "default",
 		},
 		Address: "1.2.3.4:5678",
 	}
-	ms := NewEndpoint(pod, nil)
+	ms := NewEndpoint(meta, nil)
 	return ms
 }
 
@@ -59,7 +47,7 @@ func defaultEndpoint() Endpoint {
 
 var (
 	endpoint = defaultEndpoint()
-	sources  = []DataSource{&DummySource{}}
+	sources  = []DataSource{&FakeDataSource{}}
 )
 
 func TestCollectorCanStartOnlyOnce(t *testing.T) {
@@ -91,7 +79,7 @@ func TestCollectorCanStopOnlyOnce(t *testing.T) {
 }
 
 func TestCollectorCollectsOnTicks(t *testing.T) {
-	source := &DummySource{}
+	source := &FakeDataSource{}
 	c := NewCollector()
 	ticker := mocks.NewTicker()
 	ctx := context.Background()
@@ -109,7 +97,7 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 }
 
 func TestCollectorStopCancelsContext(t *testing.T) {
-	source := &DummySource{}
+	source := &FakeDataSource{}
 	c := NewCollector()
 	ticker := mocks.NewTicker()
 	ctx := context.Background()

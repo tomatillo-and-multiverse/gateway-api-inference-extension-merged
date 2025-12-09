@@ -40,17 +40,21 @@ const (
 func TestExtractorExtract(t *testing.T) {
 	ctx := context.Background()
 
-	if _, err := NewExtractor("vllm: dummy", "", "", "", ""); err == nil {
+	if _, err := NewModelServerExtractor("vllm: dummy", "", "", "", ""); err == nil {
 		t.Error("expected to fail to create extractor with invalid specification")
 	}
 
-	extractor, err := NewExtractor(defaultTotalQueuedRequestsMetric, defaultTotalRunningRequestsMetric,
+	extractor, err := NewModelServerExtractor(defaultTotalQueuedRequestsMetric, defaultTotalRunningRequestsMetric,
 		defaultKvCacheUsagePercentageMetric, defaultLoraInfoMetric, defaultCacheInfoMetric)
 	if err != nil {
 		t.Fatalf("failed to create extractor: %v", err)
 	}
 
-	if name := extractor.Name(); name == "" {
+	if exType := extractor.TypedName().Type; exType == "" {
+		t.Error("empty extractor type")
+	}
+
+	if exName := extractor.TypedName().Name; exName == "" {
 		t.Error("empty extractor name")
 	}
 

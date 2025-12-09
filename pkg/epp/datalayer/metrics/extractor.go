@@ -30,12 +30,11 @@ import (
 
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datalayer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
 
 const (
-	extractorName = "model-server-protocol-metrics"
-
 	// LoRA metrics based on MSP
 	LoraInfoRunningAdaptersMetricName = "running_lora_adapters"
 	LoraInfoWaitingAdaptersMetricName = "waiting_lora_adapters"
@@ -48,9 +47,12 @@ const (
 // Extractor implements the metrics extraction based on the model
 // server protocol standard.
 type Extractor struct {
-	mapping *Mapping
+	typedName plugins.TypedName
+	mapping   *Mapping
 }
 
+// Produces returns the data attributes that are provided by the datalayer.metrics
+// package.
 func Produces() map[string]any {
 	return map[string]any{
 		metrics.WaitingQueueSizeKey:    int(0),
@@ -62,23 +64,27 @@ func Produces() map[string]any {
 	}
 }
 
-// NewExtractor returns a new model server protocol (MSP) metrics extractor,
+// NewModelServerExtractor returns a new model server protocol (MSP) metrics extractor,
 // configured with the given metrics' specifications.
 // These are mandatory metrics per the MSP specification, and are used
 // as the basis for the built-in scheduling plugins.
-func NewExtractor(queueSpec, runningSpec, kvusageSpec, loraSpec, cacheInfoSpec string) (*Extractor, error) {
+func NewModelServerExtractor(queueSpec, runningSpec, kvusageSpec, loraSpec, cacheInfoSpec string) (*Extractor, error) {
 	mapping, err := NewMapping(queueSpec, runningSpec, kvusageSpec, loraSpec, cacheInfoSpec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create extractor metrics Mapping - %w", err)
 	}
 	return &Extractor{
+		typedName: plugins.TypedName{
+			Type: MetricsExtractorType,
+			Name: MetricsExtractorType,
+		},
 		mapping: mapping,
 	}, nil
 }
 
-// Name returns the name of the metrics.Extractor.
-func (ext *Extractor) Name() string {
-	return extractorName
+// TypedName returns the type and name of the metrics.Extractor.
+func (ext *Extractor) TypedName() plugins.TypedName {
+	return ext.typedName
 }
 
 // ExpectedType defines the type expected by the metrics.Extractor - a
@@ -147,7 +153,7 @@ func (ext *Extractor) Extract(ctx context.Context, data any, ep datalayer.Endpoi
 		}
 	}
 
-	logger := log.FromContext(ctx).WithValues("pod", ep.GetPod().NamespacedName)
+	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().NamespacedName)
 	if updated {
 		clone.UpdateTime = time.Now()
 		logger.V(logutil.TRACE).Info("Refreshed metrics", "updated", clone)

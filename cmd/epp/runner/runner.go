@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
@@ -125,6 +126,7 @@ var (
 	certPath            = flag.String("cert-path", runserver.DefaultCertPath, "The path to the certificate for secure serving. The certificate and private key files "+
 		"are assumed to be named tls.crt and tls.key, respectively. If not set, and secureServing is enabled, "+
 		"then a self-signed certificate is used.")
+	enableCertReload = flag.Bool("enable-cert-reload", runserver.DefaultCertReload, "Enables certificate reloading of the certificates specified in --cert-path")
 	// metric flags
 	totalQueuedRequestsMetric    = flag.String("total-queued-requests-metric", runserver.DefaultTotalQueuedRequestsMetric, "Prometheus metric for the number of queued requests.")
 	totalRunningRequestsMetric   = flag.String("total-running-requests-metric", runserver.DefaultTotalRunningRequestsMetric, "Prometheus metric for the number of running requests.")
@@ -351,10 +353,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		admissionController = requestcontrol.NewLegacyAdmissionController(saturationDetector)
 	}
 
+	locator := requestcontrol.NewDatastorePodLocator(ds)
+	cachedLocator := requestcontrol.NewCachedPodLocator(ctx, locator, time.Millisecond*50)
 	director := requestcontrol.NewDirectorWithConfig(
 		ds,
 		scheduler,
 		admissionController,
+		cachedLocator,
 		r.requestControlConfig)
 
 	// --- Setup ExtProc Server Runner ---
@@ -366,6 +371,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		SecureServing:                    *secureServing,
 		HealthChecking:                   *healthChecking,
 		CertPath:                         *certPath,
+		EnableCertReload:                 *enableCertReload,
 		RefreshPrometheusMetricsInterval: *refreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        *metricsStalenessThreshold,
 		Director:                         director,
@@ -433,11 +439,14 @@ func (r *Runner) registerInTreePlugins() {
 	plugins.Register(scorer.LoraAffinityScorerType, scorer.LoraAffinityScorerFactory)
 	// Latency predictor plugins
 	plugins.Register(slo_aware_router.SLOAwareRouterPluginType, slo_aware_router.SLOAwareRouterFactory)
-	plugins.Register(profile.SLOAwareProfileHandlerType, profile.SLOAwareProfileHandlerFactory)
+	plugins.Register(slo_aware_router.SLOAwareProfileHandlerType, slo_aware_router.SLOAwareProfileHandlerFactory)
 	// register filter for test purpose only (used in conformance tests)
 	plugins.Register(testfilter.HeaderBasedTestingFilterType, testfilter.HeaderBasedTestingFilterFactory)
 	// register response received plugin for test purpose only (used in conformance tests)
 	plugins.Register(testresponsereceived.DestinationEndpointServedVerifierType, testresponsereceived.DestinationEndpointServedVerifierFactory)
+	// register datalayer metrics collection plugins
+	plugins.Register(dlmetrics.MetricsDataSourceType, dlmetrics.MetricsDataSourceFactory)
+	plugins.Register(dlmetrics.MetricsExtractorType, dlmetrics.ModelServerExtractorFactory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context) (*configapi.EndpointPickerConfig, error) {
@@ -463,7 +472,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context) (*configapi.End
 
 	r.registerInTreePlugins()
 
-	rawConfig, featureGates, err := loader.LoadConfigPhaseOne(configBytes, logger)
+	rawConfig, featureGates, err := loader.LoadRawConfig(configBytes, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config - %w", err)
 	}
@@ -473,10 +482,23 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context) (*configapi.End
 	return rawConfig, nil
 }
 
+// Return a function that can be used in the EPP Handle to list pod names.
+func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
+	return func() []types.NamespacedName {
+		pods := ds.PodList(datastore.AllPodsPredicate)
+		names := make([]types.NamespacedName, 0, len(pods))
+
+		for _, p := range pods {
+			names = append(names, p.GetMetadata().NamespacedName)
+		}
+		return names
+	}
+}
+
 func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
 	logger := log.FromContext(ctx)
-	handle := plugins.NewEppHandle(ctx, ds.PodList)
-	cfg, err := loader.LoadConfigPhaseTwo(rawConfig, handle, logger)
+	handle := plugins.NewEppHandle(ctx, makePodListFunc(ds))
+	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to load the configuration - %w", err)
@@ -602,11 +624,10 @@ func setupMetricsV1(setupLog logr.Logger) (datalayer.EndpointFactory, error) {
 // are to be configured), must be done before the EndpointFactory is initialized.
 func setupDatalayer(logger logr.Logger) (datalayer.EndpointFactory, error) {
 	// create and register a metrics data source and extractor.
-	source := dlmetrics.NewDataSource(*modelServerMetricsScheme,
+	source := dlmetrics.NewMetricsDataSource(*modelServerMetricsScheme,
 		*modelServerMetricsPath,
-		*modelServerMetricsHttpsInsecureSkipVerify,
-		nil)
-	extractor, err := dlmetrics.NewExtractor(*totalQueuedRequestsMetric,
+		*modelServerMetricsHttpsInsecureSkipVerify)
+	extractor, err := dlmetrics.NewModelServerExtractor(*totalQueuedRequestsMetric,
 		*totalRunningRequestsMetric,
 		*kvCacheUsagePercentageMetric,
 		*loraInfoMetric, *cacheInfoMetric)
@@ -624,7 +645,7 @@ func setupDatalayer(logger logr.Logger) (datalayer.EndpointFactory, error) {
 	// TODO: this could be moved to the configuration loading functions once ported over.
 	sources := datalayer.GetSources()
 	for _, src := range sources {
-		logger.Info("data layer configuration", "source", src.Name(), "extractors", src.Extractors())
+		logger.Info("data layer configuration", "source", src.TypedName().String(), "extractors", src.Extractors())
 	}
 	factory := datalayer.NewEndpointFactory(sources, *refreshMetricsInterval)
 	return factory, nil
