@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sync/semaphore"
 )
 
 // --- Predictor Client ---
@@ -43,6 +44,8 @@ type Predictor struct {
 	bufferMu sync.Mutex
 	pending  []TrainingEntry
 
+	httpSem *semaphore.Weighted
+
 	wg   sync.WaitGroup
 	done chan struct{}
 }
@@ -56,6 +59,7 @@ func New(config *Config, logger logr.Logger) *Predictor {
 		httpClient: &http.Client{Timeout: config.HTTPTimeout},
 		logger:     logger.WithName("latency-predictor-client"),
 		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		httpSem:    semaphore.NewWeighted(int64(config.MaxConcurrentRequests)),
 		done:       make(chan struct{}),
 	}
 	p.wg.Add(1)

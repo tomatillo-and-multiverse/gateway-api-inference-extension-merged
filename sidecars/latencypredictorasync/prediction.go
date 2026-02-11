@@ -80,6 +80,11 @@ func (p *Predictor) PredictBulk(ctx context.Context, requests []PredictionReques
 		}
 	}
 
+	if err := p.httpSem.Acquire(ctx, 1); err != nil {
+		return nil, fmt.Errorf("failed to acquire prediction semaphore: %w", err)
+	}
+	defer p.httpSem.Release(1)
+
 	payload := BulkPredictionRequest{Requests: requests}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -144,6 +149,11 @@ func (p *Predictor) PredictBulkStrict(ctx context.Context, requests []Prediction
 			return nil, fmt.Errorf("validation failed for request %d: %w", i, err)
 		}
 	}
+
+	if err := p.httpSem.Acquire(ctx, 1); err != nil {
+		return nil, fmt.Errorf("failed to acquire prediction semaphore: %w", err)
+	}
+	defer p.httpSem.Release(1)
 
 	payload := BulkPredictionRequest{Requests: requests}
 	data, err := json.Marshal(payload)
@@ -213,6 +223,11 @@ func (p *Predictor) predictBayesianRidge(req PredictionRequest, mr *MetricsRespo
 
 // predictHTTP makes an HTTP call to a randomly selected prediction server for XGBoost/LightGBM predictions
 func (p *Predictor) predictHTTP(ctx context.Context, req PredictionRequest) (*PredictionResponse, error) {
+	if err := p.httpSem.Acquire(ctx, 1); err != nil {
+		return nil, fmt.Errorf("failed to acquire prediction semaphore: %w", err)
+	}
+	defer p.httpSem.Release(1)
+
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal prediction request: %w", err)

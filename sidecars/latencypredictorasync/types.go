@@ -51,6 +51,9 @@ type Config struct {
 	MetricsRefreshInterval time.Duration
 	// MaxBulkSize is the maximum number of predictions to send in a single bulk request.
 	MaxBulkSize int
+	// MaxConcurrentRequests is the maximum number of concurrent HTTP requests
+	// to the prediction server. Additional callers block until a slot is available.
+	MaxConcurrentRequests int
 }
 
 func DefaultConfig() *Config {
@@ -63,6 +66,7 @@ func DefaultConfig() *Config {
 		UseNativeXGBoost:       true,
 		HTTPTimeout:            10 * time.Second,
 		MaxBulkSize:            100,
+		MaxConcurrentRequests:  10,
 	}
 }
 
@@ -109,6 +113,11 @@ func ConfigFromEnv() *Config {
 	if bulkStr := os.Getenv("LATENCY_MAX_BULK_SIZE"); bulkStr != "" {
 		if size, err := strconv.Atoi(bulkStr); err == nil && size > 0 && size <= 100 {
 			cfg.MaxBulkSize = size
+		}
+	}
+	if concStr := os.Getenv("LATENCY_MAX_CONCURRENT_REQUESTS"); concStr != "" {
+		if n, err := strconv.Atoi(concStr); err == nil && n > 0 {
+			cfg.MaxConcurrentRequests = n
 		}
 	}
 	return cfg

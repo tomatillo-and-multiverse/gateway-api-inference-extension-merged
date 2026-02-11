@@ -18,9 +18,14 @@ package latencypredictorasync
 
 import (
 	"context"
+	"encoding/json"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2266,4 +2271,100 @@ func TestConfigurationHandling(t *testing.T) {
 	predictor.wg.Wait()
 
 	t.Log("✅ Configuration handling tests completed")
+}
+
+func TestSemaphoreLimitsConcurrentHTTPRequests(t *testing.T) {
+	const maxConcurrent = 2
+	const totalRequests = 10
+
+	var inFlight int64
+	var maxObserved int64
+	var mu sync.Mutex
+
+	// Fake prediction server that tracks concurrency
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := atomic.AddInt64(&inFlight, 1)
+		defer atomic.AddInt64(&inFlight, -1)
+
+		mu.Lock()
+		if cur > maxObserved {
+			maxObserved = cur
+		}
+		mu.Unlock()
+
+		time.Sleep(50 * time.Millisecond)
+
+		resp := PredictionResponse{
+			TTFT:        100.0,
+			TPOT:        10.0,
+			PredictedAt: time.Now(),
+			ModelType:   "xgboost",
+			Quantile:    0.9,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	zapLog, _ := zap.NewDevelopment()
+	logger := zapr.NewLogger(zapLog)
+
+	config := &Config{
+		TrainingURL:            server.URL,
+		PredictionURLs:         []string{server.URL},
+		MaxSampleSize:          100,
+		FlushInterval:          10 * time.Second,
+		MetricsRefreshInterval: 10 * time.Second,
+		HTTPTimeout:            5 * time.Second,
+		MaxBulkSize:            100,
+		MaxConcurrentRequests:  maxConcurrent,
+	}
+
+	predictor := New(config, logger)
+	// Stop the background loop immediately since we don't need it
+	close(predictor.done)
+	predictor.wg.Wait()
+
+	// Set server status so predictHTTP path is used
+	predictor.metricsMu.Lock()
+	predictor.serverStatus = &ServerStatusResponse{
+		IsReady:   true,
+		ModelType: "xgboost",
+		Quantile:  0.9,
+	}
+	predictor.metricsMu.Unlock()
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errs := make([]error, totalRequests)
+
+	for i := 0; i < totalRequests; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, errs[idx] = predictor.Predict(ctx, PredictionRequest{
+				KVCachePercentage:  0.5,
+				InputTokenLength:   100,
+				NumRequestWaiting:  1,
+				NumRequestRunning:  1,
+				NumTokensGenerated: 10,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("request %d failed: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	observed := maxObserved
+	mu.Unlock()
+
+	if observed > maxConcurrent {
+		t.Errorf("semaphore violated: max concurrent requests observed = %d, limit = %d", observed, maxConcurrent)
+	}
+	t.Logf("max concurrent requests observed: %d (limit: %d)", observed, maxConcurrent)
 }
