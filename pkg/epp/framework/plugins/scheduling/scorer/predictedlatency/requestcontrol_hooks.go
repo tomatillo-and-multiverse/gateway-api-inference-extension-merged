@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -60,6 +61,9 @@ type predictedLatencyCtx struct {
 
 	prefixCacheScoresForEndpoints map[string]float64
 
+	// promptLen is the word count of the prompt, computed once based on API type.
+	promptLen int
+
 	// ttftSLO is the target time to first token SLO for the request.
 	ttftSLO float64
 	// TPOTSLO is the target time per output token SLO for the request.
@@ -79,6 +83,39 @@ func newPredictedLatencyContext(request *schedulingtypes.LLMRequest) *predictedL
 		prefixCacheScoresForEndpoints: make(map[string]float64),
 		predictionsForScheduling:      make([]endpointPredictionResult, 0),
 		hasValidEndpoint:              true,
+		promptLen:                     computePromptLen(request.Body),
+	}
+}
+
+// computePromptLen returns the word count of the prompt based on API type.
+func computePromptLen(body *schedulingtypes.LLMRequestBody) int {
+	if body == nil {
+		return 0
+	}
+	switch {
+	case body.Completions != nil:
+		return len(strings.Fields(body.Completions.Prompt))
+	case body.ChatCompletions != nil:
+		totalLen := 0
+		for _, msg := range body.ChatCompletions.Messages {
+			totalLen += len(strings.Fields(msg.Content.PlainText()))
+		}
+		return totalLen
+	case body.Responses != nil:
+		if input, ok := body.Responses.Input.(string); ok {
+			return len(strings.Fields(input))
+		}
+		return 0
+	case body.Conversations != nil:
+		totalLen := 0
+		for _, item := range body.Conversations.Items {
+			if content, ok := item.Content.(string); ok {
+				totalLen += len(strings.Fields(content))
+			}
+		}
+		return totalLen
+	default:
+		return 0
 	}
 }
 

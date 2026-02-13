@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -85,7 +84,7 @@ func processPreRequestForLatencyPrediction(
 
 	in := latencypredictor.PredictionRequest{
 		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+		InputTokenLength:   predictedLatencyCtx.promptLen,
 		NumRequestWaiting:  m.WaitingQueueSize,
 		NumRequestRunning:  m.RunningRequestsSize,
 		NumTokensGenerated: 0,
@@ -172,7 +171,7 @@ func recordTTFTTrainingData(
 	// Train TTFT
 	entry := latencypredictor.TrainingEntry{
 		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+		InputTokenLength:   predictedLatencyCtx.promptLen,
 		ActualTTFT:         predictedLatencyCtx.ttft,
 		ActualTPOT:         0,
 		Timestamp:          now,
@@ -202,7 +201,7 @@ func predictFirstTPOT(
 	// Predict first TPOT
 	in := latencypredictor.PredictionRequest{
 		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+		InputTokenLength:   predictedLatencyCtx.promptLen,
 		NumRequestWaiting:  m.WaitingQueueSize,
 		NumRequestRunning:  m.RunningRequestsSize,
 		NumTokensGenerated: predictedLatencyCtx.generatedTokenCount,
@@ -260,7 +259,7 @@ func processTokenForLatencyPrediction(
 	// Record actual TPOT
 	entry := latencypredictor.TrainingEntry{
 		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+		InputTokenLength:   predictedLatencyCtx.promptLen,
 		ActualTTFT:         0,
 		ActualTPOT:         latencyMs,
 		Timestamp:          now,
@@ -277,7 +276,7 @@ func processTokenForLatencyPrediction(
 	if predictedLatencyCtx.tokenSampler.shouldPredict(predictedLatencyCtx.generatedTokenCount) {
 		in := latencypredictor.PredictionRequest{
 			KVCachePercentage:  m.KVCacheUsagePercent,
-			InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+			InputTokenLength:   predictedLatencyCtx.promptLen,
 			NumRequestWaiting:  m.WaitingQueueSize,
 			NumRequestRunning:  m.RunningRequestsSize,
 			NumTokensGenerated: predictedLatencyCtx.generatedTokenCount,
@@ -312,16 +311,16 @@ func bulkPredictWithMetrics(
 	ctx context.Context,
 	predictor latencypredictor.PredictorInterface,
 	metricsStates []*fwkdl.Metrics,
-	prompts []string,
+	promptLen int,
 	generatedTokenCounts []int,
 	prefixCacheScores []float64,
 ) ([]*latencypredictor.PredictionResponse, error) {
 	logger := log.FromContext(ctx)
 
 	// Validate input lengths
-	if len(metricsStates) != len(prompts) || len(prompts) != len(generatedTokenCounts) || len(generatedTokenCounts) != len(prefixCacheScores) {
-		return nil, fmt.Errorf("input slice lengths must match: metrics=%d, prompts=%d, tokenCounts=%d, prefixScores=%d",
-			len(metricsStates), len(prompts), len(generatedTokenCounts), len(prefixCacheScores))
+	if len(metricsStates) != len(generatedTokenCounts) || len(generatedTokenCounts) != len(prefixCacheScores) {
+		return nil, fmt.Errorf("input slice lengths must match: metrics=%d, tokenCounts=%d, prefixScores=%d",
+			len(metricsStates), len(generatedTokenCounts), len(prefixCacheScores))
 	}
 
 	if len(metricsStates) == 0 {
@@ -340,7 +339,7 @@ func bulkPredictWithMetrics(
 	for i := range metricsStates {
 		bulkRequests[i] = latencypredictor.PredictionRequest{
 			KVCachePercentage:  metricsStates[i].KVCacheUsagePercent,
-			InputTokenLength:   len(strings.Fields(prompts[i])),
+			InputTokenLength:   promptLen,
 			NumRequestWaiting:  metricsStates[i].WaitingQueueSize,
 			NumRequestRunning:  metricsStates[i].RunningRequestsSize,
 			NumTokensGenerated: generatedTokenCounts[i],
