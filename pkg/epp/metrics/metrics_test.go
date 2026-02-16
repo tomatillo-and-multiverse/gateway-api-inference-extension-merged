@@ -29,7 +29,7 @@ import (
 	"k8s.io/component-base/metrics/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	errutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/error"
 )
 
@@ -684,6 +684,119 @@ func TestSchedulerE2ELatency(t *testing.T) {
 		})
 	}
 }
+
+func TestFlowControlDispatchCycleLengthMetric(t *testing.T) {
+	Reset()
+	scenarios := []struct {
+		name      string
+		durations []time.Duration
+	}{
+		{
+			name: "multiple scheduling latencies",
+			durations: []time.Duration{
+				50 * time.Microsecond,
+				150 * time.Microsecond,
+				300 * time.Microsecond,
+				800 * time.Microsecond,
+				1500 * time.Microsecond,
+				4 * time.Millisecond,
+				8 * time.Millisecond,
+				15 * time.Millisecond,
+				30 * time.Millisecond,
+				80 * time.Millisecond,
+				200 * time.Millisecond,
+			},
+		},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			for _, duration := range scenario.durations {
+				RecordFlowControlDispatchCycleDuration(duration)
+			}
+
+			wantDispatchCycleLatency, err := os.Open("testdata/flow_control_dispatch_cycle_duration_seconds_metric")
+			defer func() {
+				if err := wantDispatchCycleLatency.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := testutil.GatherAndCompare(metrics.Registry, wantDispatchCycleLatency, "inference_extension_flow_control_dispatch_cycle_duration_seconds"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// TODO (7028): Research histogram bins using real-world data to ensure they are optimal.
+
+func TestFlowControlEnqueueDurationMetric(t *testing.T) {
+	Reset()
+
+	scenarios := []struct {
+		name       string
+		priorities []string
+		outcomes   []string
+		durations  []time.Duration
+	}{
+		{
+			name: "multiple enqueue latencies",
+			priorities: []string{
+				"1", "1", "1", "1", "1", "1", "1",
+				"2", "2", "2", "2", "2", "2", "2",
+			},
+			outcomes: []string{
+				"Dispatched", "NotYetFinalized", "RejectedCapacity", "RejectedOther", "EvictedTTL", "EvictedContextCancelled", "EvictedOther",
+				"Dispatched", "NotYetFinalized", "RejectedCapacity", "RejectedOther", "EvictedTTL", "EvictedContextCancelled", "EvictedOther",
+			},
+			durations: []time.Duration{
+				50 * time.Microsecond,
+				200 * time.Millisecond,
+				400 * time.Microsecond,
+				15 * time.Millisecond,
+				1500 * time.Microsecond,
+				80 * time.Millisecond,
+				100 * time.Nanosecond,
+				800 * time.Microsecond,
+				1 * time.Second,
+				4 * time.Millisecond,
+				40 * time.Millisecond,
+				8 * time.Millisecond,
+				500 * time.Millisecond,
+				150 * time.Microsecond,
+			},
+		},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			for i := range scenario.priorities {
+				RecordFlowControlRequestEnqueueDuration(
+					scenario.priorities[i],
+					scenario.outcomes[i],
+					scenario.durations[i],
+				)
+			}
+
+			// Validate results
+			func() {
+				wantEnqueueLatency, err := os.Open("testdata/flow_control_enqueue_duration_seconds_metric")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer wantEnqueueLatency.Close()
+
+				if err := testutil.GatherAndCompare(metrics.Registry, wantEnqueueLatency, "inference_extension_flow_control_enqueue_duration_seconds"); err != nil {
+					t.Error(err)
+				}
+			}()
+		})
+	}
+}
+
+// TODO (7028): Research histogram bins using real-world data to ensure they are optimal.
 
 func TestSchedulerAttemptsTotal(t *testing.T) {
 

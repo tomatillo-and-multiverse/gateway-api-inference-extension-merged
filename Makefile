@@ -56,7 +56,7 @@ BBR_IMAGE_REPO ?= $(IMAGE_REGISTRY)/$(BBR_IMAGE_NAME)
 BBR_IMAGE_TAG ?= $(BBR_IMAGE_REPO):$(GIT_TAG)
 
 BASE_IMAGE ?= gcr.io/distroless/static:nonroot
-BUILDER_IMAGE ?= golang:1.24
+BUILDER_IMAGE ?= golang:1.25
 ifdef GO_VERSION
 BUILDER_IMAGE = golang:$(GO_VERSION)
 endif
@@ -365,9 +365,9 @@ inferencepool-helm-chart-push: yq helm-install
 bbr-helm-chart-push: yq helm-install
 	CHART=body-based-routing EXTRA_TAG="$(EXTRA_TAG)" IMAGE_REGISTRY="$(IMAGE_REGISTRY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
-.PHONY: epp-standalone-helm-chart-push
-epp-standalone-helm-chart-push: yq helm-install
-	CHART=epp-standalone EXTRA_TAG="$(EXTRA_TAG)" IMAGE_REGISTRY="$(IMAGE_REGISTRY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+.PHONY: standalone-helm-chart-push
+standalone-helm-chart-push: yq helm-install
+	CHART=standalone EXTRA_TAG="$(EXTRA_TAG)" IMAGE_REGISTRY="$(IMAGE_REGISTRY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 ##@ Release
 
 .PHONY: release-quickstart

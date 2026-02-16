@@ -23,11 +23,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
-
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/util/logging"
-	metricsutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/metrics"
+
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	metricsutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/metrics"
 )
 
 const (
@@ -35,15 +35,6 @@ const (
 	InferenceObjectiveComponent = "inference_objective"
 	InferencePoolComponent      = "inference_pool"
 	InferenceExtension          = "inference_extension"
-
-	// --- Internal Keys (for Legacy/Gauge Usage) ---
-	KVCacheUsagePercentKey = "KVCacheUsagePercent"
-	WaitingQueueSizeKey    = "WaitingQueueSize"
-	RunningRequestsSizeKey = "RunningRequestsSize"
-	MaxActiveModelsKey     = "MaxActiveModels"
-	ActiveModelsKey        = "ActiveModels"
-	WaitingModelsKey       = "WaitingModels"
-	UpdateTimeKey          = "UpdateTime"
 
 	// Metric Type Values
 	TypeTPOT                   = "tpot"
@@ -399,6 +390,30 @@ var (
 		append([]string{"fairness_id", "priority", "outcome", "inference_pool"}, ModelLabels...),
 	)
 
+	flowControlDispatchCycleDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: InferenceExtension,
+			Name:      "flow_control_dispatch_cycle_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Distribution of the time taken for each dispatch cycle in the EPP flow control layer.", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+			},
+		},
+		[]string{},
+	)
+
+	flowControlRequestEnqueueDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: InferenceExtension,
+			Name:      "flow_control_request_enqueue_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Distribution of the time taken to enqueue requests by the EPP flow control layer.", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+			},
+		},
+		[]string{"priority", "outcome"},
+	)
+
 	flowControlQueueSize = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: InferenceExtension,
@@ -469,8 +484,10 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(PrefixCacheHitRatio)
 		metrics.Registry.MustRegister(PrefixCacheHitLength)
 		metrics.Registry.MustRegister(flowControlRequestQueueDuration)
+		metrics.Registry.MustRegister(flowControlDispatchCycleDuration)
 		metrics.Registry.MustRegister(flowControlQueueSize)
 		metrics.Registry.MustRegister(flowControlQueueBytes)
+		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -518,6 +535,7 @@ func Reset() {
 	flowControlRequestQueueDuration.Reset()
 	flowControlQueueSize.Reset()
 	flowControlQueueBytes.Reset()
+	flowControlRequestEnqueueDuration.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 }
 
@@ -795,6 +813,21 @@ func RecordFlowControlRequestQueueDuration(
 		fairnessID, priority, outcome,
 		inferencePool,
 		modelName, targetModelName,
+	).Observe(duration.Seconds())
+}
+
+// RecordFlowControlDispatchCycleDuration records the duration of a dispatch cycle in the Flow Control layer.
+func RecordFlowControlDispatchCycleDuration(duration time.Duration) {
+	flowControlDispatchCycleDuration.WithLabelValues().Observe(duration.Seconds())
+}
+
+// RecordFlowControlRequestQueueDuration records the duration a request was in the enqueuing process in the Flow Control layer.
+func RecordFlowControlRequestEnqueueDuration(
+	priority string, outcome string,
+	duration time.Duration,
+) {
+	flowControlRequestEnqueueDuration.WithLabelValues(
+		priority, outcome,
 	).Observe(duration.Seconds())
 }
 

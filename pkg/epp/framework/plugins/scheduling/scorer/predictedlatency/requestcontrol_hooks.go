@@ -24,10 +24,10 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/jellydator/ttlcache/v3"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"k8s.io/apimachinery/pkg/types"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requestcontrol"
 	schedulingtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
@@ -39,6 +39,7 @@ var _ requestcontrol.PreRequest = &PredictedLatency{}
 var _ requestcontrol.ResponseReceived = &PredictedLatency{}
 var _ requestcontrol.ResponseStreaming = &PredictedLatency{}
 var _ requestcontrol.ResponseComplete = &PredictedLatency{}
+var _ requestcontrol.AdmissionPlugin = &PredictedLatency{}
 
 type predictedLatencyCtx struct {
 	schedulingRequest         schedulingtypes.LLMRequest
@@ -250,4 +251,29 @@ func (t *PredictedLatency) checkPredictor(logger logr.Logger, metadata *fwkdl.En
 		return false
 	}
 	return true
+}
+
+func (t *PredictedLatency) AdmitRequest(ctx context.Context, request *schedulingtypes.LLMRequest, endpoints []schedulingtypes.Endpoint) error {
+	logger := log.FromContext(ctx)
+	if request == nil {
+		// This should not happen as the framework should not call AdmitRequest with a nil request, but we defensively check to avoid panics
+		logger.V(logutil.DEBUG).Info("PredictedLatency.AdmitRequest: request is nil, skipping")
+		return nil
+	}
+
+	predictedLatencyCtx, err := t.getPredictedLatencyContextForRequest(request)
+	if err != nil {
+		// If we can't find the predictedLatency context, we log the error but allow the request to proceed. This is a fail-open approach to avoid rejecting requests due to internal errors in our plugin.
+		id := request.Headers[requtil.RequestIdHeaderKey]
+		logger.V(logutil.DEBUG).Error(err, "PredictedLatency.AdmitRequest: Failed to get PredictedLatency context for request", "requestID", id)
+		return nil
+	}
+
+	// If there is no valid pod for the request, reject it
+	if !predictedLatencyCtx.hasValidEndpoint && request.Objectives.Priority < 0 {
+		logger.V(logutil.DEBUG).Info("PredictedLatency.AdmitRequest: Rejecting a sheddable request as no valid endpoint available due to slo violation", "requestID", request.Headers[requtil.RequestIdHeaderKey])
+		return errors.New("no valid endpoint available to serve the request")
+	}
+
+	return nil
 }

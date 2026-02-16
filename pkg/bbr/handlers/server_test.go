@@ -26,7 +26,8 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/util/logging"
+	bbr "sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/plugins"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 func TestProcessRequestBody(t *testing.T) {
@@ -139,7 +140,7 @@ func TestProcessRequestBody(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			srv := NewServer(tc.streaming, &fakeDatastore{})
+			srv := NewServer(tc.streaming, &fakeDatastore{}, []bbr.BBRPlugin{})
 			streamedBody := &streamedBody{}
 			for i, body := range tc.bodys {
 				got, err := srv.processRequestBody(context.Background(), body, streamedBody, log.FromContext(ctx))

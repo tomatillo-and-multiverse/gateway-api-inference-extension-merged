@@ -4,4 +4,4 @@
     Create a Hugging Face secret to download the model [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct).
     Ensure that the token grants access to this model.
 
-    Deploy a sample  deployment with the proper protocol to work with the LLM Instance Gateway.
+    Deploy a sample model server deployment with the proper protocol to work with the LLM Instance Gateway.

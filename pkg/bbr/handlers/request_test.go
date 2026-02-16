@@ -30,7 +30,8 @@ import (
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/metrics"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/util/logging"
+	bbr "sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/plugins"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 func TestHandleRequestBody(t *testing.T) {
@@ -267,7 +268,7 @@ func TestHandleRequestBody(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := NewServer(test.streaming, &fakeDatastore{})
+			server := NewServer(test.streaming, &fakeDatastore{}, []bbr.BBRPlugin{})
 			bodyBytes, _ := json.Marshal(test.body)
 			resp, err := server.HandleRequestBody(ctx, bodyBytes)
 			if err != nil {

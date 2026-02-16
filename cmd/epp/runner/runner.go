@@ -23,17 +23,14 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"regexp"
-	"runtime"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
-	uberzap "go.uber.org/zap"
 	"google.golang.org/grpc"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -42,7 +39,6 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -50,11 +46,13 @@ import (
 	configapi "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 	"sigs.k8s.io/gateway-api-inference-extension/internal/runnable"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/common"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/profiling"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/tracing"
 	backendmetrics "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend/metrics"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/config"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/config/loader"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datalayer"
-	dlmetrics "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datalayer/metrics"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datastore"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/flowcontrol"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/flowcontrol/contracts"
@@ -62,7 +60,11 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/flowcontrol/framework/plugins/fairness"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/flowcontrol/framework/plugins/ordering"
 	fcregistry "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/flowcontrol/registry"
+	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
 	fwkplugin "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	extractormetrics "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	sourcemetrics "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/source/metrics"
+	sourcenotifications "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	testresponsereceived "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/picker"
@@ -142,6 +144,9 @@ func (r *Runner) WithCustomCollectors(collectors ...prometheus.Collector) *Runne
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	// Setup a very basic logger in case command line argument parsing fails
+	logutil.InitSetupLogging()
+
 	setupLog.Info(r.eppExecutableName+" build", "commit-sha", version.CommitSHA, "build-ref", version.BuildRef)
 
 	opts := runserver.NewOptions()
@@ -163,12 +168,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	})
 	setupLog.Info("Flags processed", "flags", flags)
 
-	initLogging(&opts.ZapOptions)
+	logutil.InitLogging(&opts.ZapOptions)
 
 	if opts.Tracing {
-		err := common.InitTracing(ctx, setupLog)
+		err := tracing.InitTracing(ctx, setupLog)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to init tracing %w", err)
 		}
 	}
 
@@ -259,7 +264,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if opts.EnablePprof {
-		if err = setupPprofHandlers(mgr); err != nil {
+		setupLog.Info("Setting pprof handlers")
+		if err = profiling.SetupPprofHandlers(mgr); err != nil {
 			setupLog.Error(err, "Failed to setup pprof handlers")
 			return err
 		}
@@ -277,7 +283,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
 	datalayerMetricsEnabled := r.featureGates[datalayer.ExperimentalDatalayerFeatureGate]
-	if err := r.setupDataLayer(datalayerMetricsEnabled, eppConfig.DataConfig, epf); err != nil {
+	if err := r.setupDataLayer(datalayerMetricsEnabled, eppConfig.DataConfig, epf, mgr); err != nil {
 		setupLog.Error(err, "failed to initialize data layer")
 		return err
 	}
@@ -356,20 +362,51 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+// NewEndpointPoolFromOptions constructs an EndpointPool from standalone options.
+// This is shared between the production runner and standalone integration tests.
+func NewEndpointPoolFromOptions(
+	namespace string,
+	name string,
+	endpointSelector string,
+	endpointTargetPorts []int,
+) (*datalayer.EndpointPool, error) {
+
+	if namespace == "" {
+		return nil, errors.New("namespace must not be empty")
+	}
+	if name == "" {
+		return nil, errors.New("name must not be empty")
+	}
+	if endpointSelector == "" {
+		return nil, errors.New("endpoint selector must not be empty")
+	}
+	if len(endpointTargetPorts) == 0 {
+		return nil, errors.New("endpoint target ports must not be empty")
+	}
+
+	selectorMap, err := labels.ConvertSelectorToLabelsMap(endpointSelector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse endpoint selector %q: %w", endpointSelector, err)
+	}
+
+	pool := datalayer.NewEndpointPool(namespace, name)
+	pool.Selector = selectorMap
+	pool.TargetPorts = append(pool.TargetPorts, endpointTargetPorts...)
+
+	return pool, nil
+}
+
 func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory, modelServerMetricsPort int32,
 	startCrdReconcilers bool, namespace, name, endpointSelector string, endpointTargetPorts []int) (datastore.Datastore, error) {
+
 	if startCrdReconcilers {
 		return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort), nil
 	} else {
-		endpointPool := datalayer.NewEndpointPool(namespace, name)
-		labelsMap, err := labels.ConvertSelectorToLabelsMap(endpointSelector)
+		endpointPool, err := NewEndpointPoolFromOptions(namespace, name, endpointSelector, endpointTargetPorts)
 		if err != nil {
-			setupLog.Error(err, "Failed to parse flag %q with error: %w", "endpoint-selector", err)
+			setupLog.Error(err, "Failed to construct endpoint pool from options")
 			return nil, err
 		}
-		endpointPool.Selector = labelsMap
-		endpointPool.TargetPorts = append(endpointPool.TargetPorts, endpointTargetPorts...)
-
 		endpointPoolOption := datastore.WithEndpointPool(endpointPool)
 		return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort, endpointPoolOption), nil
 	}
@@ -398,16 +435,15 @@ func (r *Runner) registerInTreePlugins() {
 	// register response received plugin for test purpose only (used in conformance tests)
 	fwkplugin.Register(testresponsereceived.DestinationEndpointServedVerifierType, testresponsereceived.DestinationEndpointServedVerifierFactory)
 	// register datalayer metrics collection plugins
-	fwkplugin.Register(dlmetrics.MetricsDataSourceType, dlmetrics.MetricsDataSourceFactory)
-	fwkplugin.Register(dlmetrics.MetricsExtractorType, dlmetrics.ModelServerExtractorFactory)
+	fwkplugin.Register(sourcemetrics.MetricsDataSourceType, sourcemetrics.MetricsDataSourceFactory)
+	fwkplugin.Register(extractormetrics.MetricsExtractorType, extractormetrics.ModelServerExtractorFactory)
+	// register datalayer k8s notification source plugin
+	fwkplugin.Register(sourcenotifications.NotificationSourceType, sourcenotifications.NotificationSourceFactory)
+	// register request control pluigns
 	fwkplugin.Register(requestattributereporter.RequestAttributeReporterType, requestattributereporter.RequestAttributeReporterPluginFactory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {
-	if opts.ConfigText == "" && opts.ConfigFile == "" {
-		return nil, nil // configuring through code, not through file
-	}
-
 	logger := log.FromContext(ctx)
 
 	var configBytes []byte
@@ -468,9 +504,10 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	// Add requestControl plugins
 	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
 
-	// Sort prepare data plugins in DAG order (topological sort). Also check prepare data plugins for cycles.
-	if r.requestControlConfig.PrepareDataPluginGraph() != nil {
-		return nil, errors.New("failed to load the configuration - prepare data plugins have cyclic dependencies")
+	// Sort data plugins in DAG order (topological sort). Also check DAG for cycles.
+	// Also Order PrepareData plugins based on data dependencies.
+	if err := r.requestControlConfig.ValidateAndOrderDataDependencies(); err != nil {
+		return nil, fmt.Errorf("failed to load the configuration - %w", err)
 	}
 	// TODO(#1970): Remove feature gate check once prepare data plugins are stable.
 	if !r.featureGates[datalayer.PrepareDataPluginsFeatureGate] {
@@ -521,24 +558,39 @@ func (r *Runner) applyDeprecatedSaturationConfig(cfg *config.Config) {
 	}
 }
 
-func (r *Runner) setupDataLayer(enableNewMetrics bool, cfg *datalayer.Config, epf datalayer.EndpointFactory) error {
+func (r *Runner) setupDataLayer(enableNewMetrics bool, cfg *datalayer.Config,
+	epf datalayer.EndpointFactory, mgr ctrl.Manager) error {
 	disallowedMetricsExtractor := ""
 	if !enableNewMetrics { // using backend.PodMetrics, disallow datalayer's metrics data source/extractor
-		disallowedMetricsExtractor = dlmetrics.MetricsExtractorType
+		disallowedMetricsExtractor = extractormetrics.MetricsExtractorType
 	}
 
 	if err := datalayer.WithConfig(cfg, disallowedMetricsExtractor); err != nil {
 		return err
 	}
 
-	sources := datalayer.GetSources()
-	if enableNewMetrics && len(sources) == 0 {
-		err := errors.New("data layer enabled but no data sources configured")
-		return err
+	allSources := datalayer.GetSources()
+	if enableNewMetrics && len(allSources) == 0 {
+		return errors.New("data layer enabled but no data sources configured")
 	}
 
-	epf.SetSources(sources)
-	for _, src := range sources {
+	// Partition sources: poll-based go to the endpoint factory, notification
+	// sources get bound to the manager's watch/reconciliation loops.
+	var collectors []fwkdl.DataSource
+	for _, src := range allSources {
+		if notifySrc, ok := src.(fwkdl.NotificationSource); ok {
+			if err := datalayer.BindNotificationSource(notifySrc, mgr); err != nil {
+				return fmt.Errorf("failed to bind notification source %s: %w", notifySrc.TypedName(), err)
+			}
+			setupLog.Info("notification source bound", "source", notifySrc.TypedName().String(), "gvk", notifySrc.GVK())
+		} else {
+			collectors = append(collectors, src)
+		}
+	}
+
+	epf.SetSources(collectors)
+
+	for _, src := range allSources { // log data layer configuration
 		setupLog.Info("data layer configuration", "source", src.TypedName().String(), "extractors", src.Extractors())
 	}
 	return nil
@@ -588,11 +640,6 @@ func setupMetricsV1(opts *runserver.Options) (datalayer.EndpointFactory, error) 
 	return pmf, nil
 }
 
-func initLogging(opts *zap.Options) {
-	logger := zap.New(zap.UseFlagOptions(opts), zap.RawZapOpts(uberzap.AddCaller()))
-	ctrl.SetLogger(logger)
-}
-
 // registerExtProcServer adds the ExtProcServerRunner as a Runnable to the manager.
 func registerExtProcServer(mgr manager.Manager, runner *runserver.ExtProcServerRunner, logger logr.Logger) error {
 	if err := mgr.Add(runner.AsRunnable(logger)); err != nil {
@@ -633,32 +680,6 @@ func verifyMetricMapping(mapping backendmetrics.MetricMapping) {
 	if mapping.CacheConfigInfo == nil {
 		setupLog.Info("Not scraping metric: CacheConfigInfo")
 	}
-}
-
-// setupPprofHandlers only implements the pre-defined profiles:
-// https://cs.opensource.google/go/go/+/refs/tags/go1.24.4:src/runtime/pprof/pprof.go;l=108
-func setupPprofHandlers(mgr ctrl.Manager) error {
-	setupLog.Info("Enabling pprof handlers")
-	var err error
-	profiles := []string{
-		"heap",
-		"goroutine",
-		"allocs",
-		"threadcreate",
-		"block",
-		"mutex",
-	}
-	for _, p := range profiles {
-		err = mgr.AddMetricsServerExtraHandler("/debug/pprof/"+p, pprof.Handler(p))
-		if err != nil {
-			return err
-		}
-	}
-
-	runtime.SetMutexProfileFraction(1)
-	runtime.SetBlockProfileRate(1)
-
-	return nil
 }
 
 func extractDeploymentName(podName string) (string, error) {
