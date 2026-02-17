@@ -52,6 +52,7 @@ var _ requestcontrol.AdmissionPlugin = &PredictedLatency{}
 type predictedLatencyCtx struct {
 	schedulingRequest         schedulingtypes.LLMRequest
 	targetMetadata            *fwkdl.EndpointMetadata
+	prefillTargetMetadata     *fwkdl.EndpointMetadata
 	schedulingResult          *schedulingtypes.SchedulingResult
 	lastSeenMetrics           map[string]*fwkdl.Metrics
 	lastTokenTimestamp        time.Time
@@ -158,6 +159,13 @@ func (t *PredictedLatency) PreRequest(ctx context.Context, request *schedulingty
 
 	// Set up SLO request context
 	predictedLatencyCtx.targetMetadata = targetMetadata
+	if prefillResult, exists := schedulingResult.ProfileResults[Experimental_DefaultPrefillProfile]; exists && prefillResult != nil && len(prefillResult.TargetEndpoints) > 0 {
+		prefillMetadata := prefillResult.TargetEndpoints[0].GetMetadata()
+		predictedLatencyCtx.prefillTargetMetadata = prefillMetadata
+		logger.V(logutil.DEBUG).Info("Prefill target identified for request", "requestID", id, "prefillEndpoint", prefillMetadata.NamespacedName.String())
+	} else {
+		logger.V(logutil.DEBUG).Info("No prefill target identified for request", "requestID", id)
+	}
 	predictedLatencyCtx.schedulingResult = schedulingResult
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now()
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
