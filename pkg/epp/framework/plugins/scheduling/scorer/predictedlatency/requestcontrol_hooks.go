@@ -74,7 +74,7 @@ type predictedLatencyCtx struct {
 	avgTPOTSLO float64
 
 	// predictedTTFTForScheduling is the map of pod names to predicted TTFT values for scheduling.
-	predictionsForScheduling []endpointPredictionResult
+	predictionsForScheduling map[string]endpointPredictionResult
 
 	// boolean set if request has valid endpoint based on predictions
 	hasValidEndpoint bool
@@ -85,7 +85,7 @@ func newPredictedLatencyContext(request *schedulingtypes.LLMRequest) *predictedL
 		schedulingRequest:             *request,
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
-		predictionsForScheduling:      make([]endpointPredictionResult, 0),
+		predictionsForScheduling:      make(map[string]endpointPredictionResult),
 		hasValidEndpoint:              true,
 	}
 }
@@ -161,11 +161,8 @@ func (t *PredictedLatency) PreRequest(ctx context.Context, request *schedulingty
 	predictedLatencyCtx.schedulingResult = schedulingResult
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now()
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
-	t.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
-	if err := processPreRequestForLatencyPrediction(ctx, t.latencypredictor, t.config.EndpointRoleLabel, predictedLatencyCtx); err != nil {
-		logger.V(logutil.DEBUG).Error(err, "Process PreRequest in latencypredictor failed")
-	}
+	processPreRequestForLatencyPrediction(ctx, predictedLatencyCtx)
 }
 
 func (t *PredictedLatency) ResponseReceived(ctx context.Context, request *schedulingtypes.LLMRequest, response *requestcontrol.Response, targetMetadata *fwkdl.EndpointMetadata) {
