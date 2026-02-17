@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -65,54 +64,21 @@ func getLatestMetricsForProfile(predictedLatencyCtx *predictedLatencyCtx) (*fwkd
 // processPreRequestForLatencyPrediction refreshes metrics, applies TTFT prediction, updates predictedLatencyCtx.PredictedTTFT and timestamp.
 func processPreRequestForLatencyPrediction(
 	ctx context.Context,
-	predictor latencypredictor.PredictorInterface,
 	predictedLatencyCtx *predictedLatencyCtx,
-) error {
+) {
 	logger := log.FromContext(ctx)
 
-	// just for debugging, print the req context scheduling result cycle state
-	// print the raw scores in scheduling result
-
-	// Build prediction request
-	m, err := getLatestMetricsForProfile(predictedLatencyCtx)
-	if err != nil {
-		logger.V(logutil.DEBUG).Info("Skipping prediction due to missing metrics", "error", err)
-		return err
-	}
-
-	targetPod := predictedLatencyCtx.targetMetadata
-	prefix_cache_score := predictedLatencyCtx.prefixCacheScoresForEndpoints[targetPod.NamespacedName.Name]
-
-	in := latencypredictor.PredictionRequest{
-		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
-		NumRequestWaiting:  m.WaitingQueueSize,
-		NumRequestRunning:  m.RunningRequestsSize,
-		NumTokensGenerated: 0,
-		PrefixCacheScore:   prefix_cache_score,
-	}
-
-	// Predict TTFT
-	start := time.Now()
-	p, err := predictor.Predict(ctx, in)
-	dur := time.Since(start)
-	switch {
-	case err != nil:
-		logger.V(logutil.DEBUG).Error(err, "header TTFT predict failed", "duration_ms", dur.Milliseconds())
+	targetName := predictedLatencyCtx.targetMetadata.NamespacedName.Name
+	if storedPred, ok := predictedLatencyCtx.predictionsForScheduling[targetName]; ok {
+		logger.V(logutil.DEBUG).Info("PreRequest TTFT from stored prediction", "value_ms", storedPred.TTFT, "endpoint", targetName)
+		predictedLatencyCtx.predictedTTFT = storedPred.TTFT
+	} else {
+		logger.V(logutil.DEBUG).Info("PreRequest: no stored prediction found for target endpoint", "endpoint", targetName)
 		predictedLatencyCtx.predictedTTFT = 0
-	case p == nil:
-		logger.V(logutil.DEBUG).Info("header TTFT predict nil", "duration_ms", dur.Milliseconds())
-		predictedLatencyCtx.predictedTTFT = 0
-	default:
-		logger.V(logutil.DEBUG).Info("header TTFT succeeded", "value_ms", p.TTFT, "duration_ms", dur.Milliseconds())
-		metrics.RecordRequestTTFTPredictionDuration(ctx, predictedLatencyCtx.schedulingRequest.TargetModel, predictedLatencyCtx.incomingModelName, dur.Seconds())
-
-		predictedLatencyCtx.predictedTTFT = p.TTFT
 	}
 
 	// Advance timestamp for first token reference
 	predictedLatencyCtx.lastTokenTimestamp = time.Now()
-	return err
 }
 
 // processFirstTokenForLatencyPrediction records actual TTFT, trains, predicts first TPOT, updates predictedLatencyCtx, and advances timestamp.
@@ -142,7 +108,7 @@ func processFirstTokenForLatencyPrediction(
 	recordTTFTTrainingData(ctx, predictor, predictedLatencyCtx, m, now, prefixCacheScore)
 
 	if streamingMode {
-		predictFirstTPOT(ctx, predictor, predictedLatencyCtx)
+		predictFirstTPOT(ctx, predictedLatencyCtx)
 	}
 
 	// Advance timestamp
@@ -172,7 +138,7 @@ func recordTTFTTrainingData(
 	// Train TTFT
 	entry := latencypredictor.TrainingEntry{
 		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+		InputTokenLength:   predictedLatencyCtx.inputTokenCount,
 		ActualTTFT:         predictedLatencyCtx.ttft,
 		ActualTPOT:         0,
 		Timestamp:          now,
@@ -188,39 +154,19 @@ func recordTTFTTrainingData(
 
 func predictFirstTPOT(
 	ctx context.Context,
-	predictor latencypredictor.PredictorInterface,
 	predictedLatencyCtx *predictedLatencyCtx,
 ) {
 	logger := log.FromContext(ctx)
-	m, err := getLatestMetricsForProfile(predictedLatencyCtx)
-	if err != nil {
-		logger.V(logutil.DEBUG).Info("Skipping first TPOT prediction due to missing metrics",
-			"error", err)
-		return
-	}
-
-	// Predict first TPOT
-	in := latencypredictor.PredictionRequest{
-		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
-		NumRequestWaiting:  m.WaitingQueueSize,
-		NumRequestRunning:  m.RunningRequestsSize,
-		NumTokensGenerated: predictedLatencyCtx.generatedTokenCount,
-		PrefixCacheScore:   0,
-	}
-	start := time.Now()
-	p, err := predictor.Predict(ctx, in)
-	dur := time.Since(start)
-	if err != nil || p == nil {
-		logger.V(logutil.DEBUG).Error(err, "first TPOT predict failed", "duration_ms", dur.Milliseconds())
+	targetName := predictedLatencyCtx.targetMetadata.NamespacedName.Name
+	if storedPred, ok := predictedLatencyCtx.predictionsForScheduling[targetName]; ok {
+		logger.V(logutil.DEBUG).Info("first TPOT from stored prediction", "value_ms", storedPred.TPOT)
+		predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, storedPred.TPOT)
+		predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, storedPred.TPOT, len(predictedLatencyCtx.predictedTPOTObservations))
+	} else {
+		logger.V(logutil.DEBUG).Info("first TPOT: no stored prediction found for target endpoint", "endpoint", targetName)
 		predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, 0)
 		predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, 0, len(predictedLatencyCtx.predictedTPOTObservations))
-	} else {
-		logger.V(logutil.DEBUG).Info("first TPOT succeeded", "value_ms", p.TPOT, "duration_ms", dur.Milliseconds())
-		predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, p.TPOT)
-		predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, p.TPOT, len(predictedLatencyCtx.predictedTPOTObservations))
 	}
-	metrics.RecordRequestTPOTPredictionDuration(ctx, predictedLatencyCtx.schedulingRequest.TargetModel, predictedLatencyCtx.incomingModelName, dur.Seconds())
 }
 
 // processTokenForLatencyPrediction records actual inter-token latency, trains, predicts sampled TPOT, updates predictedLatencyCtx, and advances timestamp.
@@ -260,7 +206,7 @@ func processTokenForLatencyPrediction(
 	// Record actual TPOT
 	entry := latencypredictor.TrainingEntry{
 		KVCachePercentage:  m.KVCacheUsagePercent,
-		InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+		InputTokenLength:   predictedLatencyCtx.inputTokenCount,
 		ActualTTFT:         0,
 		ActualTPOT:         latencyMs,
 		Timestamp:          now,
@@ -277,7 +223,7 @@ func processTokenForLatencyPrediction(
 	if predictedLatencyCtx.tokenSampler.shouldPredict(predictedLatencyCtx.generatedTokenCount) {
 		in := latencypredictor.PredictionRequest{
 			KVCachePercentage:  m.KVCacheUsagePercent,
-			InputTokenLength:   len(strings.Fields(predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt)),
+			InputTokenLength:   predictedLatencyCtx.inputTokenCount,
 			NumRequestWaiting:  m.WaitingQueueSize,
 			NumRequestRunning:  m.RunningRequestsSize,
 			NumTokensGenerated: predictedLatencyCtx.generatedTokenCount,
@@ -312,16 +258,16 @@ func bulkPredictWithMetrics(
 	ctx context.Context,
 	predictor latencypredictor.PredictorInterface,
 	metricsStates []*fwkdl.Metrics,
-	prompts []string,
+	inputTokenCounts []int,
 	generatedTokenCounts []int,
 	prefixCacheScores []float64,
 ) ([]*latencypredictor.PredictionResponse, error) {
 	logger := log.FromContext(ctx)
 
 	// Validate input lengths
-	if len(metricsStates) != len(prompts) || len(prompts) != len(generatedTokenCounts) || len(generatedTokenCounts) != len(prefixCacheScores) {
-		return nil, fmt.Errorf("input slice lengths must match: metrics=%d, prompts=%d, tokenCounts=%d, prefixScores=%d",
-			len(metricsStates), len(prompts), len(generatedTokenCounts), len(prefixCacheScores))
+	if len(metricsStates) != len(inputTokenCounts) || len(inputTokenCounts) != len(generatedTokenCounts) || len(generatedTokenCounts) != len(prefixCacheScores) {
+		return nil, fmt.Errorf("input slice lengths must match: metrics=%d, inputTokenCounts=%d, tokenCounts=%d, prefixScores=%d",
+			len(metricsStates), len(inputTokenCounts), len(generatedTokenCounts), len(prefixCacheScores))
 	}
 
 	if len(metricsStates) == 0 {
@@ -340,7 +286,7 @@ func bulkPredictWithMetrics(
 	for i := range metricsStates {
 		bulkRequests[i] = latencypredictor.PredictionRequest{
 			KVCachePercentage:  metricsStates[i].KVCacheUsagePercent,
-			InputTokenLength:   len(strings.Fields(prompts[i])),
+			InputTokenLength:   inputTokenCounts[i],
 			NumRequestWaiting:  metricsStates[i].WaitingQueueSize,
 			NumRequestRunning:  metricsStates[i].RunningRequestsSize,
 			NumTokensGenerated: generatedTokenCounts[i],

@@ -18,6 +18,7 @@ package predictedlatency
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -49,6 +50,7 @@ type predictedLatencyCtx struct {
 	lastTokenTimestamp        time.Time
 	requestReceivedTimestamp  time.Time
 	generatedTokenCount       int
+	inputTokenCount           int
 	incomingModelName         string
 	ttft                      float64
 	predictedTTFT             float64
@@ -66,7 +68,7 @@ type predictedLatencyCtx struct {
 	avgTPOTSLO float64
 
 	// predictedTTFTForScheduling is the map of pod names to predicted TTFT values for scheduling.
-	predictionsForScheduling []endpointPredictionResult
+	predictionsForScheduling map[string]endpointPredictionResult
 
 	// boolean set if request has valid endpoint based on predictions
 	hasValidEndpoint bool
@@ -75,11 +77,38 @@ type predictedLatencyCtx struct {
 func newPredictedLatencyContext(request *schedulingtypes.LLMRequest) *predictedLatencyCtx {
 	return &predictedLatencyCtx{
 		schedulingRequest:             *request,
+		inputTokenCount:               estimateInputTokenCount(request),
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
-		predictionsForScheduling:      make([]endpointPredictionResult, 0),
+		predictionsForScheduling:      make(map[string]endpointPredictionResult),
 		hasValidEndpoint:              true,
 	}
+}
+
+// estimateInputTokenCount estimates the input token count from the request body,
+// supporting all API formats (Completions, ChatCompletions, Responses, Conversations).
+// Uses the same averageCharactersPerToken constant as the prefix cache plugin.
+func estimateInputTokenCount(request *schedulingtypes.LLMRequest) int {
+	if request == nil || request.Body == nil {
+		return 0
+	}
+	const averageCharactersPerToken = 4
+
+	var inputBytes []byte
+	switch {
+	case request.Body.Conversations != nil:
+		inputBytes, _ = json.Marshal(request.Body.Conversations.Items)
+	case request.Body.Responses != nil:
+		inputBytes, _ = json.Marshal(request.Body.Responses.Input)
+	case request.Body.ChatCompletions != nil:
+		inputBytes, _ = json.Marshal(request.Body.ChatCompletions.Messages)
+	case request.Body.Completions != nil:
+		inputBytes = []byte(request.Body.Completions.Prompt)
+	}
+	if len(inputBytes) == 0 {
+		return 0
+	}
+	return len(inputBytes) / averageCharactersPerToken
 }
 
 func (s *PredictedLatency) getPredictedLatencyContextForRequest(request *schedulingtypes.LLMRequest) (*predictedLatencyCtx, error) {
@@ -154,11 +183,8 @@ func (t *PredictedLatency) PreRequest(ctx context.Context, request *schedulingty
 	predictedLatencyCtx.schedulingResult = schedulingResult
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now()
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
-	t.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
-	if err := processPreRequestForLatencyPrediction(ctx, t.latencypredictor, predictedLatencyCtx); err != nil {
-		logger.V(logutil.DEBUG).Error(err, "Process PreRequest in latencypredictor failed")
-	}
+	processPreRequestForLatencyPrediction(ctx, predictedLatencyCtx)
 }
 
 func (t *PredictedLatency) ResponseReceived(ctx context.Context, request *schedulingtypes.LLMRequest, response *requestcontrol.Response, targetMetadata *fwkdl.EndpointMetadata) {
