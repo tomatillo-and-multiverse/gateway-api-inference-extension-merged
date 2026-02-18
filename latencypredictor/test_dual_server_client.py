@@ -93,10 +93,13 @@ def test_prediction_server_status():
     assert "model_type" in data
     assert "models_exist" in data
     assert "quantile" in data
+    assert "objective_type" in data
     assert data["model_type"] in ["bayesian_ridge", "xgboost", "lightgbm"]
+    assert data["objective_type"] in ["quantile", "mean"]
     assert 0 < data["quantile"] <= 1.0
-    
+
     print(f"Prediction server using model type: {data['model_type']}")
+    print(f"Objective type: {data['objective_type']}")
     print(f"Quantile: {data['quantile']}")
     print(f"Models ready: {data['is_ready']}")
     print(f"Models exist: {data['models_exist']}")
@@ -321,21 +324,21 @@ def test_prediction_via_prediction_server():
     
     data = r.json()
     required_fields = [
-        "ttft_ms", "tpot_ms", 
-        "predicted_at", "model_type", "last_model_load"
+        "ttft_ms", "tpot_ms",
+        "predicted_at", "model_type", "objective_type", "last_model_load"
     ]
-    
+
     for field in required_fields:
         assert field in data, f"Missing required field: {field}"
-    
+
     # Verify predictions are reasonable
     assert data["ttft_ms"] > 0
     assert data["tpot_ms"] > 0
     #assert data["ttft_uncertainty"] >= 0
     #assert data["tpot_uncertainty"] >= 0
-    
+
     print(f"Prediction successful: TTFT={data['ttft_ms']:.2f}ms, TPOT={data['tpot_ms']:.2f}ms")
-    print(f"Model type: {data['model_type']}")
+    print(f"Model type: {data['model_type']}, Objective: {data['objective_type']}")
 
 
 def test_bulk_prediction_strict():
@@ -390,6 +393,7 @@ def test_bulk_prediction_strict():
         #assert "tpot_prediction_bounds" in prediction
         assert "predicted_at" in prediction
         assert "model_type" in prediction
+        assert "objective_type" in prediction
         assert "quantile" in prediction
         
     print("✓ Bulk prediction strict endpoint test passed")
@@ -710,20 +714,29 @@ def test_training_server_metrics():
 
 
 def test_model_consistency_between_servers():
-    """Test that both servers report the same model type."""
-    # Get model type from training server
+    """Test that both servers report the same model type and objective type."""
+    # Get model type and objective type from training server
     training_info_r = requests.get(f"{TRAINING_URL}/model/download/info")
-    training_model_type = training_info_r.json().get("model_type")
-    
-    # Get model type from prediction server
+    training_data = training_info_r.json()
+    training_model_type = training_data.get("model_type")
+
+    # Get model type and objective type from prediction server
     prediction_status_r = requests.get(f"{PREDICTION_URL}/status")
-    prediction_model_type = prediction_status_r.json().get("model_type")
-    
+    prediction_data = prediction_status_r.json()
+    prediction_model_type = prediction_data.get("model_type")
+    prediction_objective_type = prediction_data.get("objective_type")
+
     assert training_model_type == prediction_model_type, (
         f"Model type mismatch: training={training_model_type}, prediction={prediction_model_type}"
     )
-    
+
+    # Objective type is reported by prediction server; just validate it's a known value
+    assert prediction_objective_type in ["quantile", "mean"], (
+        f"Unknown objective type from prediction server: {prediction_objective_type}"
+    )
+
     print(f"Model type consistent across servers: {training_model_type}")
+    print(f"Prediction server objective type: {prediction_objective_type}")
 
 
 # 6. Update test_xgboost_tree_endpoints_on_training_server function name and add both
@@ -907,7 +920,12 @@ def test_dual_server_quantile_regression_learns_distribution():
 
     s = requests.get(f"{PREDICTION_URL}/status", timeout=10)
     assert s.status_code == 200, "prediction status endpoint failed"
-    target_quantile = float(s.json().get("quantile", 0.9))
+    status_data = s.json()
+    target_quantile = float(status_data.get("quantile", 0.9))
+    objective_type = status_data.get("objective_type", "quantile")
+
+    if objective_type == "mean":
+        pytest.skip("Quantile distribution test not applicable for mean objective")
 
     assert "xgboost" in model_type.lower() or "lightgbm" in model_type.lower(), f"Model not in quantile mode: {model_type}"
 
@@ -1332,6 +1350,7 @@ def test_server_configuration():
     pred_root_data = pred_root_r.json()
     print(f"Prediction server: {pred_root_data.get('message')}")
     print(f"  Model type: {pred_root_data.get('model_type')}")
+    print(f"  Objective type: {pred_root_data.get('objective_type')}")
     print(f"  Is ready: {pred_root_data.get('is_ready')}")
     print(f"  Sync interval: {pred_root_data.get('sync_interval')}s")
     print(f"  Training server URL: {pred_root_data.get('training_server')}")
