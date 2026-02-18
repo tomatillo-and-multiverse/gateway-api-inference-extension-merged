@@ -96,14 +96,10 @@ func buildTrainingEntry(
 // refreshLastSeenMetrics updates predictedLatencyCtx.LastSeenMetrics for both primary and Experimental_DefaultPrefillProfile.
 func refreshLastSeenMetrics(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx) {
 	if sr := predictedLatencyCtx.schedulingResult; sr != nil {
-		// Always refresh primary profile
-		if pr := sr.ProfileResults[sr.PrimaryProfileName]; pr != nil && pr.TargetEndpoints != nil && len(pr.TargetEndpoints) > 0 {
-			predictedLatencyCtx.lastSeenMetrics[sr.PrimaryProfileName] = pr.TargetEndpoints[0].GetMetrics().Clone()
-		}
-		// Also refresh Experimental_DefaultPrefillProfile if present
-		if prefillPr, ok := sr.ProfileResults[Experimental_DefaultPrefillProfile]; ok {
-			if prefillPr != nil && prefillPr.TargetEndpoints != nil && len(prefillPr.TargetEndpoints) > 0 {
-				predictedLatencyCtx.lastSeenMetrics[Experimental_DefaultPrefillProfile] = prefillPr.TargetEndpoints[0].GetMetrics().Clone()
+
+		for profileName, profileResult := range sr.ProfileResults {
+			if profileResult != nil && profileResult.TargetEndpoints != nil && len(profileResult.TargetEndpoints) > 0 {
+				predictedLatencyCtx.lastSeenMetrics[profileName] = profileResult.TargetEndpoints[0].GetMetrics().Clone()
 			}
 		}
 	} else {
@@ -190,7 +186,7 @@ func processFirstTokenForLatencyPrediction(
 		targetEndpointMetadata := predictedLatencyCtx.targetMetadata
 		// Monolithic mode: record TTFT for the single pod
 		prefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[targetEndpointMetadata.NamespacedName.Name]
-		logger.V(logutil.DEBUG).Info("Recording TTFT training data", "ttft_ms", predictedLatencyCtx.ttft, "prefixCacheScore", prefixCacheScore)
+		logger.V(logutil.DEBUG).Info("Recording TTFT training data", "ttft_ms", predictedLatencyCtx.ttft, "predicted_ttft_ms", predictedLatencyCtx.predictedTTFT, "prefixCacheScore", prefixCacheScore)
 		recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, m, targetEndpointMetadata, now, prefixCacheScore)
 	}
 
@@ -286,6 +282,12 @@ func processTokenForLatencyPrediction(
 		predictedLatencyCtx.tpotObservations = append(predictedLatencyCtx.tpotObservations, latencyMs)
 		predictedLatencyCtx.avgTPOT = calculateRunningAverage(predictedLatencyCtx.avgTPOT, latencyMs, len(predictedLatencyCtx.tpotObservations))
 	}
+	if predictedLatencyCtx.generatedTokenCount == 2 {
+		// debug log actual and predicted tpot
+		logger.V(logutil.DEBUG).Info("First inter-token latency observed",
+			"actual_tpot_ms", latencyMs,
+			"predicted_tpot_ms", predictedLatencyCtx.avgPredictedTPOT)
+	}
 
 	m, err := getLatestMetricsForProfile(predictedLatencyCtx, predictedLatencyCtx.schedulingResult.PrimaryProfileName)
 	if err != nil {
@@ -345,6 +347,7 @@ func processTokenForLatencyPrediction(
 // Returns predictions in the same order as the input slices.
 func bulkPredictWithMetrics(
 	ctx context.Context,
+	predictedLatencyContext *predictedLatencyCtx,
 	predictor latencypredictor.PredictorInterface,
 	metricsStates []*fwkdl.Metrics,
 	endpointRoleLabel string,
@@ -410,6 +413,10 @@ func bulkPredictWithMetrics(
 		return nil, errors.New("bulk prediction returned nil result")
 	}
 
+	if predictedLatencyContext != nil {
+		metrics.RecordRequestTTFTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
+		metrics.RecordRequestTPOTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
+	}
 	// Convert to pointer slice for consistency with single prediction
 	results := make([]*latencypredictor.PredictionResponse, len(bulkResponse.Predictions))
 	for i := range bulkResponse.Predictions {
