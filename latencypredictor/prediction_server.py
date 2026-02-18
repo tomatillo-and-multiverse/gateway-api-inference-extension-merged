@@ -53,6 +53,11 @@ class ModelType(str, Enum):
     LIGHTGBM = "lightgbm"
 
 
+class ObjectiveType(str, Enum):
+    QUANTILE = "quantile"
+    MEAN = "mean"
+
+
 class PredictSettings:
     """Configuration for the prediction server."""
 
@@ -67,6 +72,7 @@ class PredictSettings:
     MODEL_TYPE: ModelType = ModelType(os.getenv("LATENCY_MODEL_TYPE", "xgboost"))
 
     QUANTILE_ALPHA: float = float(os.getenv("LATENCY_QUANTILE_ALPHA", "0.9"))
+    OBJECTIVE_TYPE: ObjectiveType = ObjectiveType(os.getenv("LATENCY_OBJECTIVE_TYPE", "quantile"))
 
     HOST: str = os.getenv("PREDICT_HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PREDICT_PORT", "8001"))
@@ -258,7 +264,7 @@ class ModelSyncer:
 
 
 class LightweightPredictor:
-    """Handles inference using loaded quantile regression models."""
+    """Handles inference using loaded regression models (quantile or mean)."""
 
     def __init__(self):
         mt = settings.MODEL_TYPE
@@ -273,6 +279,7 @@ class LightweightPredictor:
 
         self.model_type = mt
         self.quantile = settings.QUANTILE_ALPHA
+        self.objective_type = settings.OBJECTIVE_TYPE
         self.ttft_model = None
         self.tpot_model = None
         self.ttft_scaler = None
@@ -281,7 +288,7 @@ class LightweightPredictor:
         self.last_load: Optional[datetime] = None
         # Track checksums to avoid redundant reloads
         self._loaded_checksums: dict = {}
-        logging.info(f"Predictor type: {self.model_type}, quantile: {self.quantile}")
+        logging.info(f"Predictor type: {self.model_type}, objective: {self.objective_type}, quantile: {self.quantile}")
 
     @property
     def is_ready(self) -> bool:
@@ -383,7 +390,7 @@ class LightweightPredictor:
             return False
 
     def predict(self, features: dict) -> Tuple[float, float]:
-        """Make quantile predictions using the loaded models."""
+        """Make predictions using the loaded models."""
         try:
             with self.lock:
                 if not self.is_ready:
@@ -444,6 +451,9 @@ class LightweightPredictor:
                     ttft_pred_mean, ttft_std = self.ttft_model.predict(ttft_scaled, return_std=True)
                     tpot_pred_mean, tpot_std = self.tpot_model.predict(tpot_scaled, return_std=True)
 
+                    if self.objective_type == ObjectiveType.MEAN:
+                        return ttft_pred_mean[0], tpot_pred_mean[0]
+
                     std_factor = 1.28 if self.quantile == 0.9 else (2.0 if self.quantile == 0.95 else 0.674)
                     return (
                         ttft_pred_mean[0] + std_factor * ttft_std[0],
@@ -465,7 +475,7 @@ class LightweightPredictor:
             raise HTTPException(status_code=500, detail="Internal error during prediction")
 
     def predict_batch(self, features_list: List[dict]) -> Tuple[np.ndarray, np.ndarray]:
-        """Make batch quantile predictions using the loaded models."""
+        """Make batch predictions using the loaded models."""
         try:
             with self.lock:
                 if not self.is_ready:
@@ -534,6 +544,9 @@ class LightweightPredictor:
                     ttft_pred_mean, ttft_std = self.ttft_model.predict(ttft_scaled, return_std=True)
                     tpot_pred_mean, tpot_std = self.tpot_model.predict(tpot_scaled, return_std=True)
 
+                    if self.objective_type == ObjectiveType.MEAN:
+                        return ttft_pred_mean, tpot_pred_mean
+
                     std_factor = 1.28 if self.quantile == 0.9 else (2.0 if self.quantile == 0.95 else 0.674)
                     return (
                         ttft_pred_mean + std_factor * ttft_std,
@@ -563,8 +576,8 @@ predictor = LightweightPredictor()
 
 # FastAPI app
 app = FastAPI(
-    title="HTTP-based Quantile Latency Predictor",
-    description="A prediction service that downloads quantile regression models from training server via HTTP.",
+    title="HTTP-based Latency Predictor",
+    description="A prediction service that downloads regression models (quantile or mean) from training server via HTTP.",
     version="1.0.0",
 )
 
@@ -583,10 +596,11 @@ class PredictionRequest(BaseModel):
 
 
 class PredictionResponse(BaseModel):
-    ttft_ms: float = Field(..., description=f"Predicted {settings.QUANTILE_ALPHA:.0%} quantile TTFT in ms")
-    tpot_ms: float = Field(..., description=f"Predicted {settings.QUANTILE_ALPHA:.0%} quantile TPOT in ms")
+    ttft_ms: float = Field(..., description="Predicted TTFT in ms (mean or quantile depending on objective)")
+    tpot_ms: float = Field(..., description="Predicted TPOT in ms (mean or quantile depending on objective)")
     predicted_at: datetime
     model_type: str
+    objective_type: str
     quantile: float
     last_model_load: Optional[datetime]
 
@@ -594,6 +608,7 @@ class PredictionResponse(BaseModel):
 class StatusResponse(BaseModel):
     is_ready: bool
     model_type: str
+    objective_type: str
     quantile: float
     last_model_load: Optional[datetime]
     training_server_url: str
@@ -645,6 +660,7 @@ async def status_endpoint():
     return StatusResponse(
         is_ready=predictor.is_ready,
         model_type=predictor.model_type.value,
+        objective_type=predictor.objective_type.value,
         quantile=predictor.quantile,
         last_model_load=predictor.last_load,
         training_server_url=settings.TRAINING_SERVER_URL,
@@ -661,6 +677,7 @@ async def predict_endpoint(request: PredictionRequest):
             tpot_ms=max(0, tpot_pred),
             predicted_at=datetime.now(timezone.utc),
             model_type=predictor.model_type.value,
+            objective_type=predictor.objective_type.value,
             quantile=predictor.quantile,
             last_model_load=predictor.last_load,
         )
@@ -685,6 +702,7 @@ async def predict_bulk_strict_endpoint(request: BulkPredictionRequest):
                 tpot_ms=max(0, tpot_preds[i]),
                 predicted_at=current_time,
                 model_type=predictor.model_type.value,
+                objective_type=predictor.objective_type.value,
                 quantile=predictor.quantile,
                 last_model_load=predictor.last_load,
             )
@@ -744,6 +762,7 @@ async def predict_bulk_endpoint(request: BulkPredictionRequest):
                     tpot_ms=max(0, tpot_preds[batch_idx]),
                     predicted_at=current_time,
                     model_type=predictor.model_type.value,
+                    objective_type=predictor.objective_type.value,
                     quantile=predictor.quantile,
                     last_model_load=predictor.last_load,
                 )
@@ -778,6 +797,7 @@ async def reload_models():
             "loaded": loaded,
             "is_ready": predictor.is_ready,
             "model_type": predictor.model_type.value,
+            "objective_type": predictor.objective_type.value,
             "quantile": predictor.quantile,
             "last_load_time": predictor.last_load,
         }
@@ -788,21 +808,22 @@ async def reload_models():
 
 @app.get("/healthz", status_code=status.HTTP_200_OK)
 async def health_check():
-    return {"status": "ok", "service": "http-based-quantile-latency-predictor"}
+    return {"status": "ok", "service": "http-based-latency-predictor"}
 
 
 @app.get("/readyz", status_code=status.HTTP_200_OK)
 async def readiness_check():
     if not predictor.is_ready:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Models are not ready")
-    return {"status": "ready", "model_type": predictor.model_type.value, "quantile": predictor.quantile}
+    return {"status": "ready", "model_type": predictor.model_type.value, "objective_type": predictor.objective_type.value, "quantile": predictor.quantile}
 
 
 @app.get("/", include_in_schema=False)
 async def root():
     return {
-        "message": "HTTP-based Quantile Latency Predictor is running",
+        "message": "HTTP-based Latency Predictor is running",
         "model_type": predictor.model_type.value,
+        "objective_type": predictor.objective_type.value,
         "quantile": predictor.quantile,
         "is_ready": predictor.is_ready,
         "sync_interval": settings.MODEL_SYNC_INTERVAL_SEC,
