@@ -39,6 +39,9 @@ import (
 // (Completions, ChatCompletions, Responses, Conversations). This is used for word-based
 // input length estimation for latency prediction.
 func getPromptText(body *schedulingtypes.LLMRequestBody) string {
+	if body == nil {
+		return ""
+	}
 	switch {
 	case body.Completions != nil:
 		return body.Completions.Prompt
