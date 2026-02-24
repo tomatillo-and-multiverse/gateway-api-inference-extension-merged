@@ -1,13 +1,13 @@
 inferenceExtension:
   replicas: 1
   image:
-    name: epp
-    hub: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension
-    tag: main
+    name: epp-ig-latencypredictor-merged-2
+    hub: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo
+    tag: latest
     pullPolicy: Always
   extProcPort: 9002
   env: []
-  pluginsConfigFile: "default-plugins.yaml"
+  pluginsConfigFile: "custom-plugins.yaml"
   # Define additional container ports
   extraContainerPorts: []
   # Define additional service ports
@@ -19,18 +19,58 @@ inferenceExtension:
 #      targetPort: 8081
 
   # This is the plugins configuration file.
-  # pluginsCustomConfig:
-  #   custom-plugins.yaml: |
-  #     apiVersion: inference.networking.x-k8s.io/v1alpha1
-  #     kind: EndpointPickerConfig
-  #     plugins:
-  #     - type: custom-scorer
-  #       parameters:
-  #         custom-threshold: 64
-  #     schedulingProfiles:
-  #     - name: default
-  #       plugins:
-  #       - pluginRef: custom-scorer
+  pluginsCustomConfig:
+    custom-plugins.yaml: |
+      apiVersion: inference.networking.x-k8s.io/v1alpha1
+      kind: EndpointPickerConfig
+      featureGates:
+      - dataLayer
+      - prepareDataPlugins
+      plugins:
+      - type: queue-scorer
+      - type: kv-cache-utilization-scorer
+      - type: prefix-cache-scorer
+      - type: predicted-latency-scorer
+        parameters:
+          samplingMean: 1000.0
+          maxSampledTokens: 0
+          sloBufferFactor: 1.0
+          negHeadroomTTFTWeight: 0.8
+          negHeadroomTPOTWeight: 0.2
+          headroomTTFTWeight: 0.8
+          headroomTPOTWeight: 0.2
+          headroomSelectionStrategy: "least"
+          compositeKVWeight: 1.0
+          compositeQueueWeight: 1.0
+          compositePrefixWeight: 1.0
+          epsilonExploreSticky: 0.01
+          epsilonExploreNeg: 0.01
+          affinityGateTau: 0.80
+          affinityGateTauGlobal: 0.99
+          selectionMode: "linear"
+      - name: metrics-data-source
+        type: metrics-data-source
+      - name: model-server-protocol-metrics
+        type: model-server-protocol-metrics
+        parameters:
+          defaultEngine: "vllm"
+          engineConfigs:
+          - name: vllm
+            queuedRequestsSpec: "vllm:num_requests_waiting"
+            runningRequestsSpec: "vllm:num_requests_running"
+            kvUsageSpec: "vllm:gpu_cache_usage_perc"
+            loraSpec: "vllm:lora_requests_info"
+            cacheInfoSpec: "vllm:cache_config_info"
+      data:
+        sources:
+        - pluginRef: metrics-data-source
+          extractors:
+          - pluginRef: model-server-protocol-metrics
+      schedulingProfiles:
+      - name: default
+        plugins:
+        - pluginRef: predicted-latency-scorer
+          
 
   # Example environment variables:
   # env:
@@ -44,13 +84,13 @@ inferenceExtension:
 
   tolerations: []
 
-#  resources:
-#    requests:
-#      cpu: 1000m
-#      memory: 1Gi
-#    limits:
+  resources:
+   requests:
+     cpu: 4000m
+     memory: 8Gi
+   limits:
 #      cpu: 4000m
-#      memory: 8Gi
+     memory: 16Gi
 
   # Sidecar configuration for EPP
   sidecar:
@@ -61,7 +101,7 @@ inferenceExtension:
     interval: "10s"
     # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
     prometheus:
-      enabled: false
+      enabled: true
       auth:
         enabled: true
         # Service account token secret for authentication
@@ -78,7 +118,7 @@ inferenceExtension:
   # Latency Predictor Configuration
   latencyPredictor:
     # common latencyPredictor setting exists in config/charts/inference-extension/values.yaml
-    enabled: false
+    enabled: true
 
 inferencePool:
   targetPorts:
@@ -95,7 +135,7 @@ inferencePool:
 
 # Options: ["gke", "istio", "none"]
 provider:
-  name: none
+  name: gke
 
   # GKE-specific configuration.
   # This block is only used if name is "gke".
@@ -118,5 +158,5 @@ provider:
 # experimentalHttpRoute section is used to deploy httproute as part of the epp helm chart.
 # this section is temporary and should be extracted to a separate chart.
 experimentalHttpRoute:
-  enabled: false # a flag to indicate whether to create the httproute as part of the chart or not.
+  enabled: true # a flag to indicate whether to create the httproute as part of the chart or not.
   inferenceGatewayName: inference-gateway

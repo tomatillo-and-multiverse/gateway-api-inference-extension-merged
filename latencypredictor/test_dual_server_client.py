@@ -97,12 +97,14 @@ def test_prediction_server_status():
     assert data["model_type"] in ["bayesian_ridge", "xgboost", "lightgbm"]
     assert data["objective_type"] in ["quantile", "mean"]
     assert 0 < data["quantile"] <= 1.0
+    assert "ensemble_active" in data
 
     print(f"Prediction server using model type: {data['model_type']}")
     print(f"Objective type: {data['objective_type']}")
     print(f"Quantile: {data['quantile']}")
     print(f"Models ready: {data['is_ready']}")
     print(f"Models exist: {data['models_exist']}")
+    print(f"Ensemble active: {data['ensemble_active']}")
 
 
 def test_training_server_model_info():
@@ -132,10 +134,15 @@ def test_training_server_models_list():
     expected_models = ["ttft", "tpot"]
     if data["model_type"] == "bayesian_ridge":
         expected_models.extend(["ttft_scaler", "tpot_scaler"])
-    
+
     for model_name in expected_models:
         assert model_name in models, f"Model {model_name} should be listed"
         print(f"Model {model_name}: exists={models[model_name]['exists']}, size={models[model_name]['size_bytes']} bytes")
+
+    # Gated ensemble models should always be listed (may not exist yet)
+    for gated_name in ["ttft_gated", "tpot_gated"]:
+        assert gated_name in models, f"Gated model {gated_name} should be listed"
+        print(f"Model {gated_name}: exists={models[gated_name]['exists']}, size={models[gated_name]['size_bytes']} bytes")
 
 
 def test_model_download_from_training_server():
@@ -248,8 +255,8 @@ def test_add_training_data_to_training_server():
     
     # Generate 50 training samples with known pattern
     for i in range(1, 51):
-        waiting = i % 10 + 1
-        tokens = waiting
+        waiting = i % 10  # Include 0 to provide noqueue training data for ensemble
+        tokens = max(waiting, 1)
         inp_len = 10 * i
         kv = 0.5
         running = 1
@@ -655,6 +662,102 @@ def test_training_data_with_pod_type():
     print(f"✓ Successfully sent {len(all_entries)} training samples with pod_type")
 
 
+def test_prediction_noqueue_routing():
+    """Test that predictions with num_request_waiting=0 route through noqueue ensemble model."""
+    print("Testing noqueue prediction routing...")
+
+    features_noqueue = {
+        "kv_cache_percentage": 0.5,
+        "input_token_length": 200,
+        "num_request_waiting": 0,
+        "num_request_running": 1,
+        "num_tokens_generated": 4,
+        "prefix_cache_score": 0.7,
+    }
+
+    features_queued = {
+        "kv_cache_percentage": 0.5,
+        "input_token_length": 200,
+        "num_request_waiting": 5,
+        "num_request_running": 1,
+        "num_tokens_generated": 4,
+        "prefix_cache_score": 0.7,
+    }
+
+    r_noqueue = requests.post(f"{PREDICTION_URL}/predict", json=features_noqueue)
+    assert r_noqueue.status_code == 200
+    noqueue_data = r_noqueue.json()
+    assert noqueue_data["ttft_ms"] > 0
+    assert noqueue_data["tpot_ms"] > 0
+    print(f"  Noqueue prediction: TTFT={noqueue_data['ttft_ms']:.2f}ms, TPOT={noqueue_data['tpot_ms']:.2f}ms")
+
+    r_queued = requests.post(f"{PREDICTION_URL}/predict", json=features_queued)
+    assert r_queued.status_code == 200
+    queued_data = r_queued.json()
+    assert queued_data["ttft_ms"] > 0
+    assert queued_data["tpot_ms"] > 0
+    print(f"  Queued prediction: TTFT={queued_data['ttft_ms']:.2f}ms, TPOT={queued_data['tpot_ms']:.2f}ms")
+
+    # Check ensemble status
+    status_r = requests.get(f"{PREDICTION_URL}/status")
+    ensemble_active = status_r.json().get("ensemble_active", False)
+    print(f"  Ensemble active: {ensemble_active}")
+
+    print("  Noqueue and queued predictions both succeeded")
+
+
+def test_bulk_prediction_mixed_queue():
+    """Test bulk predictions with a mix of noqueue and queued requests."""
+    print("Testing bulk prediction with mixed queue states...")
+
+    requests_data = [
+        # Noqueue request (num_request_waiting=0)
+        {
+            "kv_cache_percentage": 0.5,
+            "input_token_length": 200,
+            "num_request_waiting": 0,
+            "num_request_running": 1,
+            "num_tokens_generated": 4,
+            "prefix_cache_score": 0.7,
+        },
+        # Queued request (num_request_waiting>0)
+        {
+            "kv_cache_percentage": 0.3,
+            "input_token_length": 150,
+            "num_request_waiting": 5,
+            "num_request_running": 1,
+            "num_tokens_generated": 5,
+            "prefix_cache_score": 0.5,
+        },
+        # Another noqueue request
+        {
+            "kv_cache_percentage": 0.6,
+            "input_token_length": 300,
+            "num_request_waiting": 0,
+            "num_request_running": 2,
+            "num_tokens_generated": 3,
+            "prefix_cache_score": 0.8,
+        }
+    ]
+
+    bulk_request = {"requests": requests_data}
+    r = requests.post(f"{PREDICTION_URL}/predict/bulk/strict", json=bulk_request)
+    assert r.status_code == 200
+
+    data = r.json()
+    assert data["total_requests"] == 3
+    assert data["successful_predictions"] == 3
+    assert data["failed_predictions"] == 0
+
+    for i, pred in enumerate(data["predictions"]):
+        assert pred["ttft_ms"] > 0
+        assert pred["tpot_ms"] > 0
+        queue_state = "noqueue" if requests_data[i]["num_request_waiting"] == 0 else "queued"
+        print(f"  Request {i+1} ({queue_state}): TTFT={pred['ttft_ms']:.2f}ms, TPOT={pred['tpot_ms']:.2f}ms")
+
+    print("  Bulk prediction with mixed queue states passed")
+
+
 def test_invalid_pod_type():
     """Test that invalid pod_type values are handled correctly."""
     print("Testing invalid pod_type handling...")
@@ -702,7 +805,11 @@ def test_training_server_metrics():
     
     # Should have standard metrics
     assert "training_samples_count" in content
-    
+
+    # Should have ensemble metrics
+    assert "ensemble_active{}" in content
+    assert "ensemble_mode{}" in content
+
     # Check for prefix_cache_score in TTFT metrics
     if has_coef:
         assert 'feature="prefix_cache_score"' in content, "Should have prefix_cache_score coefficient for TTFT model"
@@ -834,7 +941,7 @@ def generate_random_prediction_payload():
     return {
         "kv_cache_percentage": random.uniform(0.1, 0.9),
         "input_token_length": random.randint(10, 1000),
-        "num_request_waiting": random.randint(1, 20),
+        "num_request_waiting": random.randint(0, 20),  # Include 0 to exercise noqueue ensemble path
         "num_request_running": random.randint(1, 10),
         "num_tokens_generated": random.randint(1, 20),
         "prefix_cache_score": random.uniform(0.0, 1.0),
@@ -848,7 +955,7 @@ def generate_bulk_prediction_payload(batch_size=10):
         requests_data.append({
             "kv_cache_percentage": random.uniform(0.1, 0.9),
             "input_token_length": random.randint(10, 1000),
-            "num_request_waiting": random.randint(1, 20),
+            "num_request_waiting": random.randint(0, 20),  # Include 0 to exercise noqueue ensemble path
             "num_request_running": random.randint(1, 10),
             "num_tokens_generated": random.randint(1, 20),
             "prefix_cache_score": random.uniform(0.0, 1.0),
@@ -859,7 +966,7 @@ def generate_bulk_prediction_payload(batch_size=10):
 def generate_random_training_payload():
     """Generate a random training payload."""
     input_tokens = random.randint(10, 1000)
-    waiting_requests = random.randint(1, 20)
+    waiting_requests = random.randint(0, 20)  # Include 0 to provide noqueue training data for ensemble
     running_requests = random.randint(1, 10)
     kv = random.uniform(0.01, 0.99)
     tokens_generated = random.randint(1, 20)
@@ -1376,6 +1483,13 @@ def test_training_server_flush_api():
           f"TPOT={initial_status['training_data']['tpot_samples']}")
     print(f"  Initial test samples: TTFT={initial_status['test_data']['ttft_samples']}, "
           f"TPOT={initial_status['test_data']['tpot_samples']}")
+
+    # Verify ensemble section in data status
+    assert "ensemble" in initial_status, "Data status should include ensemble section"
+    ensemble_info = initial_status["ensemble"]
+    assert "ensemble_mode" in ensemble_info
+    assert "ensemble_active" in ensemble_info
+    print(f"  Ensemble mode: {ensemble_info['ensemble_mode']}, active: {ensemble_info['ensemble_active']}")
     
     # 2. Add training data
     print("Step 2: Adding training data...")
@@ -1592,6 +1706,8 @@ if __name__ == "__main__":
         ("Bulk Prediction With Errors", test_bulk_prediction_all_valid),
         ("Bulk predictions all valid", test_bulk_prediction_with_validation_errors),
         ("Prediction Missing Prefix Cache", test_prediction_missing_prefix_cache_score),
+        ("Noqueue Prediction Routing", test_prediction_noqueue_routing),
+        ("Bulk Mixed Queue States", test_bulk_prediction_mixed_queue),
         ("Training Metrics", test_training_server_metrics),
         ("Model Consistency", test_model_consistency_between_servers),
         ("XGBoost Trees", test_model_specific_endpoints_on_training_server),

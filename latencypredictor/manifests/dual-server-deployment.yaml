@@ -7,13 +7,15 @@ metadata:
   name: latency-predictor-config
   namespace: default
 data:
-  LATENCY_RETRAINING_INTERVAL_SEC: "1"
-  LATENCY_MIN_SAMPLES_FOR_RETRAIN: "100"
-  LATENCY_TTFT_MODEL_PATH: "/models/ttft.joblib"
-  LATENCY_TPOT_MODEL_PATH: "/models/tpot.joblib"
-  LATENCY_TTFT_SCALER_PATH: "/models/ttft_scaler.joblib"
-  LATENCY_TPOT_SCALER_PATH: "/models/tpot_scaler.joblib"
-  LATENCY_MODEL_TYPE: "xgboost"
+    LATENCY_RETRAINING_INTERVAL_SEC: "10"
+    LATENCY_MIN_SAMPLES_FOR_RETRAIN: "100"
+    LATENCY_TTFT_MODEL_PATH: "/models/ttft.joblib"
+    LATENCY_TPOT_MODEL_PATH: "/models/tpot.joblib"
+    LATENCY_TTFT_SCALER_PATH: "/models/ttft_scaler.joblib"
+    LATENCY_TPOT_SCALER_PATH: "/models/tpot_scaler.joblib"
+    LATENCY_MODEL_TYPE: "xgboost"
+    LATENCY_MAX_TRAINING_DATA_SIZE_PER_BUCKET: "500"
+    LATENCY_OBJECTIVE_TYPE: "mean"
 
 ---
 apiVersion: v1
@@ -31,36 +33,27 @@ data:
   LOCAL_TPOT_MODEL_PATH: "/local_models/tpot.joblib"
   LOCAL_TTFT_SCALER_PATH: "/local_models/ttft_scaler.joblib"
   LOCAL_TPOT_SCALER_PATH: "/local_models/tpot_scaler.joblib"
-  HTTP_TIMEOUT: "30"
-
----
-# --- 2. StorageClass for Hyperdisk ---
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: hyperdisk-balanced-sc
-provisioner: pd.csi.storage.gke.io
-parameters:
-  type: hyperdisk-balanced
-reclaimPolicy: Delete
-allowVolumeExpansion: true
-volumeBindingMode: WaitForFirstConsumer
+  UVICORN_WORKERS: "56"
+  OMP_NUM_THREADS: "1"
+  LATENCY_OBJECTIVE_TYPE: "mean"
+  MODEL_SYNC_INTERVAL_SEC: "30"
 
 ---
 # --- 3. Persistent Volume Claim (PVC) ---
-# Requests persistent storage for the models using the custom StorageClass.
+# Uses the standard GKE storage class (standard-rwo, balanced PD).
+# No custom StorageClass needed.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: training-models-pvc
   namespace: default
 spec:
-  storageClassName: hyperdisk-balanced-sc # Explicitly use the compatible StorageClass
+  storageClassName:   hyperdisk-balanced-sc #standard-rwo
   accessModes:
     - ReadWriteOnce # Sufficient since only the leader pod writes to the volume.
   resources:
     requests:
-      storage: 100Gi
+      storage: 20Gi
 ---
 # --- 3. Training Server Deployment ---
 apiVersion: apps/v1
@@ -84,10 +77,10 @@ spec:
         component: training
     spec:
       nodeSelector:
-        cloud.google.com/gke-nodepool: "pool-2"
+        cloud.google.com/gke-nodepool: "pool-5"
       containers:
       - name: training-server
-        image: placeholder-for-training-server-image:latest # TODO Replace with actual image
+        image: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/latencypredictor-training-server:latest # TODO Replace with actual image
 
         imagePullPolicy: Always
         ports:
@@ -108,12 +101,12 @@ spec:
         resources:
           # Increased CPU & memory
           requests:
-            cpu: "1000m"            # was 500m
-            memory: "2Gi"           # was 512Mi
+            cpu: "2"            # was 500m
+            memory: "4Gi"           # was 512Mi
             #ephemeral-storage: "50Gi" # new: reserve 5Gi of scratch space
           limits:
-            cpu: "2000m"            # was 1000m
-            memory: "4Gi"           # was 1Gi
+            cpu: "4"            # was 1000m
+            memory: "8Gi"           # was 1Gi
             #ephemeral-storage: "100Gi" # new: cap at 10Gi of scratch space
 
         envFrom:
@@ -145,7 +138,7 @@ metadata:
     app: prediction-server
     component: prediction
 spec:
-  replicas: 10
+  replicas: 1
   selector:
     matchLabels:
       app: prediction-server
@@ -157,10 +150,10 @@ spec:
         component: prediction
     spec:
       nodeSelector:
-        cloud.google.com/gke-nodepool: "pool-2"
+        cloud.google.com/gke-nodepool: "pool-5"
       containers:
       - name: prediction-server
-        image: placeholder-for-prediction-server-image:latest # TODO Replace with actual image
+        image: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/latencypredictor-prediction-server:latest # TODO Replace with actual image
         imagePullPolicy: Always
         ports:
         - containerPort: 8001
@@ -171,20 +164,23 @@ spec:
             port: 8001
           initialDelaySeconds: 15
           periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 5
         readinessProbe:
           httpGet:
             path: /readyz
             port: 8001
           initialDelaySeconds: 10
-          periodSeconds: 5
-          failureThreshold: 10  # Allow more failures while downloading models
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
         resources:
           requests:
-            cpu: "250m"
-            memory: "512Mi"
+            cpu: "8000m"
+            memory: "8Gi"
           limits:
-            cpu: "1000m"
-            memory: "2Gi"
+            cpu: "28000m"
+            memory: "16Gi"
         envFrom:
         - configMapRef:
             name: prediction-server-config

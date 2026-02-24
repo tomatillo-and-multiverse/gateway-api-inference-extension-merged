@@ -112,6 +112,28 @@ class Settings:
     QUANTILE_ALPHA: float = float(os.getenv("LATENCY_QUANTILE_ALPHA", "0.9"))  # p90 quantile
     OBJECTIVE_TYPE: ObjectiveType = ObjectiveType(os.getenv("LATENCY_OBJECTIVE_TYPE", "quantile"))
     SAMPLE_WEIGHTING_FOR_PREFIX_CACHE: bool = os.getenv("LATENCY_SAMPLE_WEIGHTING_FOR_PREFIX_CACHE", "false").lower() == "true"
+    ENSEMBLE_MODE: bool = os.getenv("LATENCY_ENSEMBLE_MODE", "true").lower() == "true"
+    MIN_SAMPLES_FOR_ENSEMBLE_SPLIT: int = int(os.getenv("LATENCY_MIN_SAMPLES_FOR_ENSEMBLE_SPLIT", "200"))
+
+    # Gated ensemble model paths (each wraps noqueue + queued sub-models)
+    TTFT_GATED_MODEL_PATH: str = os.getenv("LATENCY_TTFT_GATED_MODEL_PATH", "/tmp/models/ttft_gated.joblib")
+    TPOT_GATED_MODEL_PATH: str = os.getenv("LATENCY_TPOT_GATED_MODEL_PATH", "/tmp/models/tpot_gated.joblib")
+
+
+class QueueGatedModel:
+    """Wraps noqueue + queued sub-models into one joblib-serializable object.
+
+    At prediction time the caller checks num_request_waiting and picks the
+    appropriate sub-model + scaler from inside this wrapper.
+    """
+
+    def __init__(self, noqueue_model, queued_model,
+                 noqueue_scaler=None, queued_scaler=None):
+        self.noqueue_model = noqueue_model
+        self.queued_model = queued_model
+        self.noqueue_scaler = noqueue_scaler
+        self.queued_scaler = queued_scaler
+
 
 settings = Settings()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -275,9 +297,14 @@ class LatencyPredictor:
         self.tpot_model = None
         self.ttft_scaler = None
         self.tpot_scaler = None
-    
+
         self.ttft_coefficients = None  # Will store descaled coefficients as dict
         self.tpot_coefficients = None  # Will store descaled coefficients as dict
+
+        # Gated ensemble model wrappers (QueueGatedModel instances)
+        self.ttft_gated: Optional[QueueGatedModel] = None
+        self.tpot_gated: Optional[QueueGatedModel] = None
+        self.ensemble_active: bool = False
 
         self.lock = threading.Lock()
         self.last_retrain_time = None
@@ -314,6 +341,36 @@ class LatencyPredictor:
         prefix_bucket = self._get_prefix_bucket(sample['prefix_cache_score'])  # NEW
 
         return (queue_bucket, cache_bucket, prefix_bucket)
+
+    def _split_samples_by_queue(self, buckets: dict) -> Tuple[list, list]:
+        """Split bucket samples into noqueue (queue_bucket==0) and queued (queue_bucket>=1).
+
+        Returns:
+            (noqueue_samples, queued_samples)
+        """
+        noqueue_samples = []
+        queued_samples = []
+        for (queue_bucket, cache_bucket, prefix_bucket), bucket_deque in buckets.items():
+            if queue_bucket == 0:
+                noqueue_samples.extend(bucket_deque)
+            else:
+                queued_samples.extend(bucket_deque)
+        return noqueue_samples, queued_samples
+
+    def _prepare_features_for_ensemble(self, df: pd.DataFrame, model_type: str, queue_regime: str) -> pd.DataFrame:
+        """Prepare features for ensemble sub-models.
+
+        Args:
+            df: DataFrame with raw features
+            model_type: 'ttft' or 'tpot'
+            queue_regime: 'noqueue' or 'queued'
+        Returns:
+            DataFrame with engineered features, with queue columns dropped for noqueue regime
+        """
+        features = self._prepare_features_with_interaction(df, model_type)
+        if queue_regime == "noqueue":
+            features = features.drop(columns=['is_queued', 'num_request_waiting'], errors='ignore')
+        return features
 
     def _store_descaled_coefficients(self, model, scaler, feature_names, model_name):
         """
@@ -368,6 +425,9 @@ class LatencyPredictor:
             # If pod_type column doesn't exist, create it as empty (monolithic)
             df['pod_type_cat'] = pd.Categorical([''] * len(df), categories=['', 'prefill', 'decode'], ordered=False)
 
+        # Binary feature: gives the tree a clean signal to partition idle vs queued
+        df['is_queued'] = (df['num_request_waiting'] > 0).astype(int)
+
         if model_type == "ttft":
             # Create interaction: prefix score * input length
             # This captures that prefix caching benefit scales with input size
@@ -384,6 +444,7 @@ class LatencyPredictor:
 
             # Return TTFT features with interaction and pod_type
             feature_cols = [
+            'is_queued',
             'kv_cache_percentage',
             'input_token_length',
             'num_request_waiting',
@@ -397,6 +458,7 @@ class LatencyPredictor:
         else:  # tpot
             # TPOT doesn't use prefix_cache_score, so no interaction needed
             feature_cols = [
+                'is_queued',
                 'kv_cache_percentage',
                 'input_token_length',
                 'num_request_waiting',
@@ -435,7 +497,7 @@ class LatencyPredictor:
     
 
 
-    def _train_model_with_scaling(self, features: pd.DataFrame, target: pd.Series, model_name: str = None, sample_weight: np.ndarray = None) -> Union[Tuple[BayesianRidge, StandardScaler], xgb.XGBRegressor, lgb.LGBMRegressor]:
+    def _train_model_with_scaling(self, features: pd.DataFrame, target: pd.Series, model_name: str = None, sample_weight: np.ndarray = None, drop_queue_features: bool = False) -> Union[Tuple[BayesianRidge, StandardScaler], xgb.XGBRegressor, lgb.LGBMRegressor]:
 
         try:
             if len(features) == 0 or len(target) == 0:
@@ -473,10 +535,16 @@ class LatencyPredictor:
             elif self.model_type == ModelType.XGBOOST:  # XGBoost with quantile regression
                 if model_name == "ttft":
                      # enforce your TTFT feature order (including pod_type_cat)
-                        ttft_order = [
-                            "kv_cache_percentage", "input_token_length", "num_request_waiting",
-                            "num_request_running", "prefix_cache_score", "effective_input_tokens", "prefill_score_bucket", "pod_type_cat"
-                        ]
+                        if drop_queue_features:
+                            ttft_order = [
+                                "kv_cache_percentage", "input_token_length",
+                                "num_request_running", "prefix_cache_score", "effective_input_tokens", "prefill_score_bucket", "pod_type_cat"
+                            ]
+                        else:
+                            ttft_order = [
+                                "is_queued", "kv_cache_percentage", "input_token_length", "num_request_waiting",
+                                "num_request_running", "prefix_cache_score", "effective_input_tokens", "prefill_score_bucket", "pod_type_cat"
+                            ]
                         if list(features.columns) != ttft_order:
                             try:
                                 features = features[ttft_order]
@@ -529,15 +597,15 @@ class LatencyPredictor:
 
 
                 elif model_name == "tpot":
-                    tpot_order = ["kv_cache_percentage","input_token_length","num_request_waiting","num_request_running","num_tokens_generated","pod_type_cat"]
+                    if drop_queue_features:
+                        tpot_order = ["kv_cache_percentage","input_token_length","num_request_running","num_tokens_generated","pod_type_cat"]
+                    else:
+                        tpot_order = ["is_queued","kv_cache_percentage","input_token_length","num_request_waiting","num_request_running","num_tokens_generated","pod_type_cat"]
                     if list(features.columns) != tpot_order:
                         try:
                             features = features[tpot_order]
                         except Exception as _:
                             raise ValueError(f"TPOT features must be exactly {tpot_order}; got {list(features.columns)}")
-                    mono_str = "(1,1,1,1,1,0)"  # pod_type_cat has no monotone constraint
-                else:
-                    mono_str = "(0,0,0,0,0,0)"  # default (6 features with pod_type_cat)
                 xgb_params = dict(
                     n_estimators=200,
                     max_depth=6,
@@ -609,16 +677,16 @@ class LatencyPredictor:
             if model_name == "ttft":
                 if self.model_type == ModelType.BAYESIAN_RIDGE:
                     feature_cols = [
-                        'kv_cache_percentage','input_token_length','num_request_waiting',
+                        'is_queued','kv_cache_percentage','input_token_length','num_request_waiting',
                         'num_request_running','prefix_cache_score','effective_input_tokens','pod_type_cat'
                     ]
                 else:
                     feature_cols = [
-                        'kv_cache_percentage','input_token_length','num_request_waiting',
+                        'is_queued','kv_cache_percentage','input_token_length','num_request_waiting',
                         'num_request_running','prefix_cache_score','effective_input_tokens','prefill_score_bucket','pod_type_cat'
                     ]
             else:
-                feature_cols = ['kv_cache_percentage', 'input_token_length',
+                feature_cols = ['is_queued','kv_cache_percentage', 'input_token_length',
                                'num_request_waiting', 'num_request_running', 'num_tokens_generated', 'pod_type_cat']
 
             X = df_features[feature_cols]
@@ -705,11 +773,11 @@ class LatencyPredictor:
                 if len(df_ttft) >= settings.MIN_SAMPLES_FOR_RETRAIN:
                     # Updated TTFT features to include prefix_cache_score and pod_type_cat
                     ttft_feature_cols_tree = [
-                    'kv_cache_percentage','input_token_length','num_request_waiting',
+                    'is_queued','kv_cache_percentage','input_token_length','num_request_waiting',
                     'num_request_running','prefix_cache_score','effective_input_tokens','prefill_score_bucket','pod_type_cat'
                 ]
                     ttft_feature_cols_br = [
-                    'kv_cache_percentage','input_token_length','num_request_waiting',
+                    'is_queued','kv_cache_percentage','input_token_length','num_request_waiting',
                     'num_request_running','prefix_cache_score','effective_input_tokens'
                 ]
 
@@ -817,32 +885,105 @@ class LatencyPredictor:
                 else:
                     logging.warning("Not enough TPOT samples, skipping TPOT training.")
 
+            # --- Ensemble (gated) training ---
+            new_ttft_gated = None
+            new_tpot_gated = None
+
+            if settings.ENSEMBLE_MODE:
+                try:
+                    with self.lock:
+                        ttft_noqueue, ttft_queued = self._split_samples_by_queue(self.ttft_data_buckets)
+                        tpot_noqueue, tpot_queued = self._split_samples_by_queue(self.tpot_data_buckets)
+
+                    min_split = settings.MIN_SAMPLES_FOR_ENSEMBLE_SPLIT
+                    split_counts = {
+                        "ttft_noqueue": len(ttft_noqueue),
+                        "ttft_queued": len(ttft_queued),
+                        "tpot_noqueue": len(tpot_noqueue),
+                        "tpot_queued": len(tpot_queued),
+                    }
+                    logging.info(f"Ensemble split counts: {split_counts}, min required: {min_split}")
+
+                    if all(cnt >= min_split for cnt in split_counts.values()):
+                        sub_models = {}  # key -> (model, scaler_or_None)
+
+                        for key, samples, model_name, target_col, regime in [
+                            ("ttft_noqueue", ttft_noqueue, "ttft", "actual_ttft_ms", "noqueue"),
+                            ("ttft_queued",  ttft_queued,  "ttft", "actual_ttft_ms", "queued"),
+                            ("tpot_noqueue", tpot_noqueue, "tpot", "actual_tpot_ms", "noqueue"),
+                            ("tpot_queued",  tpot_queued,  "tpot", "actual_tpot_ms", "queued"),
+                        ]:
+                            try:
+                                raw = pd.DataFrame(samples).dropna()
+                                raw = raw[raw[target_col] > 0]
+                                X = self._prepare_features_for_ensemble(raw.copy(), model_name, regime)
+                                y = raw[target_col]
+                                drop_q = (regime == "noqueue")
+                                result = self._train_model_with_scaling(X, y, model_name=model_name, drop_queue_features=drop_q)
+                                if self.model_type == ModelType.BAYESIAN_RIDGE:
+                                    sub_models[key] = result  # (model, scaler)
+                                else:
+                                    sub_models[key] = (result, None)
+                                logging.info(f"{key} model trained on {len(raw)} samples")
+                            except Exception:
+                                logging.error(f"Error training {key} model", exc_info=True)
+
+                        # Build gated wrappers only if all 4 sub-models trained
+                        if len(sub_models) == 4:
+                            new_ttft_gated = QueueGatedModel(
+                                noqueue_model=sub_models["ttft_noqueue"][0],
+                                queued_model=sub_models["ttft_queued"][0],
+                                noqueue_scaler=sub_models["ttft_noqueue"][1],
+                                queued_scaler=sub_models["ttft_queued"][1],
+                            )
+                            new_tpot_gated = QueueGatedModel(
+                                noqueue_model=sub_models["tpot_noqueue"][0],
+                                queued_model=sub_models["tpot_queued"][0],
+                                noqueue_scaler=sub_models["tpot_noqueue"][1],
+                                queued_scaler=sub_models["tpot_queued"][1],
+                            )
+                            logging.info("Ensemble training succeeded — built QueueGatedModel wrappers")
+                        else:
+                            logging.warning("Ensemble training failed for some sub-models, falling back to single model")
+                    else:
+                        logging.info("Insufficient samples for ensemble split, using single model only")
+                except Exception:
+                    logging.error("Error in ensemble training block", exc_info=True)
+
             with self.lock:
                 if new_ttft_model:
                     self.ttft_model = new_ttft_model
                     if new_ttft_scaler is not None:
                         self.ttft_scaler = new_ttft_scaler
-                    
+
                     # Store descaled coefficients for Bayesian Ridge
                     if self.model_type == ModelType.BAYESIAN_RIDGE:
                         ttft_features = ttft_feature_cols_br  # no 'prefill_score_bucket' for BR
                         self.ttft_coefficients = self._store_descaled_coefficients(
                         new_ttft_model, new_ttft_scaler, ttft_features, "TTFT"
                 )
-                        
+
                 if new_tpot_model:
                     self.tpot_model = new_tpot_model
                     if new_tpot_scaler is not None:
                         self.tpot_scaler = new_tpot_scaler
-                    
+
                     # Store descaled coefficients for Bayesian Ridge
                     if self.model_type == ModelType.BAYESIAN_RIDGE:
-                        tpot_features = ['kv_cache_percentage', 'input_token_length', 
+                        tpot_features = ['kv_cache_percentage', 'input_token_length',
                                        'num_request_waiting', 'num_request_running', 'num_tokens_generated']
                         self.tpot_coefficients = self._store_descaled_coefficients(
                             new_tpot_model, new_tpot_scaler, tpot_features, "TPOT"
                         )
-                
+
+                # Update gated ensemble models
+                if new_ttft_gated and new_tpot_gated:
+                    self.ttft_gated = new_ttft_gated
+                    self.tpot_gated = new_tpot_gated
+                    self.ensemble_active = True
+                else:
+                    self.ensemble_active = False
+
                 if self.is_ready:
                     self.last_retrain_time = datetime.now(timezone.utc)
                     try:
@@ -1075,10 +1216,21 @@ class LatencyPredictor:
                 os.makedirs(os.path.dirname(settings.TPOT_SCALER_PATH), exist_ok=True)
                 joblib.dump(self.tpot_scaler, settings.TPOT_SCALER_PATH)
                 logging.info("TPOT scaler saved.")
-        
+
+            # Save gated ensemble models (2 files instead of 8)
+            if self.ensemble_active:
+                for gated, path, name in [
+                    (self.ttft_gated, settings.TTFT_GATED_MODEL_PATH, "TTFT gated"),
+                    (self.tpot_gated, settings.TPOT_GATED_MODEL_PATH, "TPOT gated"),
+                ]:
+                    if gated:
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
+                        joblib.dump(gated, path)
+                        logging.info(f"{name} ensemble model saved.")
+
         except Exception as e:
             logging.error(f"Error saving models: {e}", exc_info=True)
-            
+
     def flush_training_data(self, flush_training: bool = True, flush_test: bool = True, 
                    flush_metrics: bool = True, reason: str = None) -> dict:
         """
@@ -1202,6 +1354,8 @@ class LatencyPredictor:
             lines.append(f'model_type{{type="{self.model_type.value}"}} 1')
             lines.append(f'objective_type{{type="{self.objective_type.value}"}} 1')
             lines.append(f'model_quantile{{}} {self.quantile}')
+            lines.append(f'ensemble_active{{}} {1 if self.ensemble_active else 0}')
+            lines.append(f'ensemble_mode{{}} {1 if settings.ENSEMBLE_MODE else 0}')
 
             # Helper: emit linear‐model coefs or tree importances
             def emit_metrics(model, coefficients, feats, prefix):
@@ -1236,14 +1390,14 @@ class LatencyPredictor:
                         lines.append(f'{prefix}_importance{{feature="{f}"}} {imp:.6f}')
 
             if self.model_type == ModelType.BAYESIAN_RIDGE:
-                ttft_feats = ["kv_cache_percentage","input_token_length","num_request_waiting",
+                ttft_feats = ["is_queued","kv_cache_percentage","input_token_length","num_request_waiting",
                   "num_request_running","prefix_cache_score","effective_input_tokens"]
-                tpot_feats = ["kv_cache_percentage","input_token_length","num_request_waiting",
+                tpot_feats = ["is_queued","kv_cache_percentage","input_token_length","num_request_waiting",
                   "num_request_running","num_tokens_generated"]
             else:
-                ttft_feats = ["kv_cache_percentage","input_token_length","num_request_waiting",
+                ttft_feats = ["is_queued","kv_cache_percentage","input_token_length","num_request_waiting",
                   "num_request_running","prefix_cache_score","effective_input_tokens","prefill_score_bucket","pod_type_cat"]
-                tpot_feats = ["kv_cache_percentage","input_token_length","num_request_waiting",
+                tpot_feats = ["is_queued","kv_cache_percentage","input_token_length","num_request_waiting",
                   "num_request_running","num_tokens_generated","pod_type_cat"]
             emit_metrics(ttft_model, self.ttft_coefficients, ttft_feats, "ttft")
             emit_metrics(tpot_model, self.tpot_coefficients, tpot_feats, "tpot")
@@ -1601,6 +1755,10 @@ async def get_data_status():
             key = f"queue_{q}_cache_{c}_prefix_{p}"
             bucket_distribution[key] = len(bucket)
     
+    # Compute per-regime sample counts
+    ttft_noqueue, ttft_queued = predictor._split_samples_by_queue(predictor.ttft_data_buckets)
+    tpot_noqueue, tpot_queued = predictor._split_samples_by_queue(predictor.tpot_data_buckets)
+
     return {
         "training_data": {
             "ttft_samples": ttft_training_count,
@@ -1611,6 +1769,15 @@ async def get_data_status():
             "ttft_samples": len(predictor.ttft_test_data),
             "tpot_samples": len(predictor.tpot_test_data),
             "total_samples": len(predictor.ttft_test_data) + len(predictor.tpot_test_data)
+        },
+        "ensemble": {
+            "ensemble_mode": settings.ENSEMBLE_MODE,
+            "ensemble_active": predictor.ensemble_active,
+            "min_samples_for_split": settings.MIN_SAMPLES_FOR_ENSEMBLE_SPLIT,
+            "ttft_noqueue_samples": len(ttft_noqueue),
+            "ttft_queued_samples": len(ttft_queued),
+            "tpot_noqueue_samples": len(tpot_noqueue),
+            "tpot_queued_samples": len(tpot_queued),
         },
         "metrics": {
             "ttft_scores_count": len(predictor.ttft_quantile_loss_scores),
@@ -1722,9 +1889,11 @@ async def model_info(model_name: str):
         "ttft": settings.TTFT_MODEL_PATH,
         "tpot": settings.TPOT_MODEL_PATH,
         "ttft_scaler": settings.TTFT_SCALER_PATH,
-        "tpot_scaler": settings.TPOT_SCALER_PATH
+        "tpot_scaler": settings.TPOT_SCALER_PATH,
+        "ttft_gated": settings.TTFT_GATED_MODEL_PATH,
+        "tpot_gated": settings.TPOT_GATED_MODEL_PATH,
     }
-    
+
     if model_name not in model_paths:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_name}")
     
@@ -1755,9 +1924,11 @@ async def download_model(model_name: str):
         "ttft": settings.TTFT_MODEL_PATH,
         "tpot": settings.TPOT_MODEL_PATH,
         "ttft_scaler": settings.TTFT_SCALER_PATH,
-        "tpot_scaler": settings.TPOT_SCALER_PATH
+        "tpot_scaler": settings.TPOT_SCALER_PATH,
+        "ttft_gated": settings.TTFT_GATED_MODEL_PATH,
+        "tpot_gated": settings.TPOT_GATED_MODEL_PATH,
     }
-    
+
     if model_name not in model_paths:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_name}")
     
@@ -1783,9 +1954,11 @@ async def list_models():
         "ttft": settings.TTFT_MODEL_PATH,
         "tpot": settings.TPOT_MODEL_PATH,
         "ttft_scaler": settings.TTFT_SCALER_PATH,
-        "tpot_scaler": settings.TPOT_SCALER_PATH
+        "tpot_scaler": settings.TPOT_SCALER_PATH,
+        "ttft_gated": settings.TTFT_GATED_MODEL_PATH,
+        "tpot_gated": settings.TPOT_GATED_MODEL_PATH,
     }
-    
+
     for model_name, model_path in model_paths.items():
         if os.path.exists(model_path):
             stat = os.stat(model_path)
