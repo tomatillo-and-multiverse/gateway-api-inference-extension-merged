@@ -19,6 +19,7 @@ package predictedlatency
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,10 +29,47 @@ import (
 
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
+	schedulingtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics"
 	requtil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/request"
 	latencypredictor "sigs.k8s.io/gateway-api-inference-extension/sidecars/latencypredictorasync"
 )
+
+// getPromptText extracts a text representation of the user input from any supported API format
+// (Completions, ChatCompletions, Responses, Conversations). This is used for word-based
+// input length estimation for latency prediction.
+func getPromptText(body *schedulingtypes.LLMRequestBody) string {
+	switch {
+	case body.Completions != nil:
+		return body.Completions.Prompt
+
+	case body.ChatCompletions != nil:
+		var sb strings.Builder
+		for _, msg := range body.ChatCompletions.Messages {
+			sb.WriteString(msg.Content.PlainText())
+			sb.WriteString(" ")
+		}
+		return sb.String()
+
+	case body.Responses != nil:
+		// Marshal the input to JSON and use the string representation for word count estimation.
+		b, err := json.Marshal(body.Responses.Input)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+
+	case body.Conversations != nil:
+		b, err := json.Marshal(body.Conversations.Items)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+
+	default:
+		return ""
+	}
+}
 
 // buildPredictionRequest constructs a prediction request from endpoint metrics and request data.
 // If endpointRoleLabel is configured, it extracts the role from the endpoint's labels and
@@ -224,7 +262,7 @@ func recordTTFTTrainingData(
 		endpointRoleLabel,
 		targetEndpointMetadata,
 		m,
-		predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt,
+		predictedLatencyCtx.promptText,
 		predictedLatencyCtx.ttft,
 		0, // TTFT training
 		now,
@@ -299,7 +337,7 @@ func processTokenForLatencyPrediction(
 		endpointRoleLabel,
 		targetEndpointMetadata,
 		m,
-		predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt,
+		predictedLatencyCtx.promptText,
 		0, // TTFT not recorded for TPOT
 		latencyMs,
 		now,
@@ -316,7 +354,7 @@ func processTokenForLatencyPrediction(
 			endpointRoleLabel,
 			targetEndpointMetadata,
 			m,
-			predictedLatencyCtx.schedulingRequest.Body.Completions.Prompt,
+			predictedLatencyCtx.promptText,
 			predictedLatencyCtx.generatedTokenCount,
 			0, // TPOT does not use prefix cache score
 		)

@@ -63,7 +63,7 @@ func (s *PredictedLatency) generatePredictions(ctx context.Context, request *sch
 
 		metricsStates[i] = endpoint.GetMetrics()
 		targetEndpointsMetadatas[i] = endpoint.GetMetadata()
-		prompts[i] = request.Body.Completions.Prompt
+		prompts[i] = getPromptText(request.Body)
 		generatedTokenCounts[i] = 1
 		prefixCacheScores[i] = prefixCacheScore
 	}

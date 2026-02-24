@@ -67,6 +67,9 @@ type predictedLatencyCtx struct {
 	tpotObservations          []float64
 	predictedTPOTObservations []float64
 
+	// promptText is the cached text representation of the request prompt, computed once.
+	promptText string
+
 	prefixCacheScoresForEndpoints map[string]float64
 
 	// ttftSLO is the target time to first token SLO for the request.
@@ -84,6 +87,7 @@ type predictedLatencyCtx struct {
 func newPredictedLatencyContext(request *schedulingtypes.LLMRequest) *predictedLatencyCtx {
 	return &predictedLatencyCtx{
 		schedulingRequest:             *request,
+		promptText:                    getPromptText(request.Body),
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
 		predictionsForScheduling:      make(map[string]endpointPredictionResult),
@@ -148,7 +152,7 @@ func (t *PredictedLatency) PreRequest(ctx context.Context, request *schedulingty
 	predictedLatencyCtx, err := t.getPredictedLatencyContextForRequest(request)
 	if err != nil {
 		id := request.Headers[requtil.RequestIdHeaderKey]
-		logger.V(logutil.DEBUG).Error(err, "PredictedLatency.PreRequest: Failed to get SLO context for request", "requestID", id)
+		logger.V(logutil.DEBUG).Info("PredictedLatency.PreRequest: Failed to get SLO context for request", "error", err, "requestID", id)
 		return
 	}
 
@@ -196,7 +200,7 @@ func (t *PredictedLatency) ResponseStreaming(ctx context.Context, request *sched
 	predictedLatencyCtx, err := t.getPredictedLatencyContextForRequest(request)
 	if err != nil {
 		id := request.Headers[requtil.RequestIdHeaderKey]
-		logger.V(logutil.TRACE).Error(err, "PredictedLatency.ResponseStreaming: Failed to get SLO context for request", "requestID", id)
+		logger.V(logutil.DEBUG).Info("PredictedLatency.ResponseStreaming: Failed to get SLO context for request", "error", err, "requestID", id)
 		return
 	}
 
@@ -222,7 +226,7 @@ func (t *PredictedLatency) ResponseComplete(ctx context.Context, request *schedu
 	predictedLatencyCtx, err := t.getPredictedLatencyContextForRequest(request)
 	if err != nil {
 		id := request.Headers[requtil.RequestIdHeaderKey]
-		logger.V(logutil.DEBUG).Error(err, "PredictedLatency.ResponseComplete: Failed to get SLO context for request", "requestID", id)
+		logger.V(logutil.DEBUG).Info("PredictedLatency.ResponseComplete: Failed to get SLO context for request", "error", err, "requestID", id)
 		return
 	}
 	now := time.Now()
