@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -69,7 +70,8 @@ type predictedLatencyCtx struct {
 	predictedTPOTObservations []float64
 
 	// promptText is the cached text representation of the request prompt, computed once.
-	promptText string
+	promptText      string
+	inputTokenCount int // word-count estimate of prompt length, cached for counter bookkeeping
 
 	prefixCacheScoresForEndpoints map[string]float64
 
@@ -83,12 +85,19 @@ type predictedLatencyCtx struct {
 
 	// boolean set if request has valid endpoint based on predictions
 	hasValidEndpoint bool
+
+	// Snapshots of per-pod token-in-flight counters captured at dispatch time (PreRequest).
+	// Used when building training entries so that training data reflects scheduling-time load.
+	prefillTokensAtDispatch int64
+	decodeTokensAtDispatch  int64
 }
 
 func newPredictedLatencyContext(request *schedulingtypes.LLMRequest) *predictedLatencyCtx {
+	promptText := getPromptText(request.Body)
 	return &predictedLatencyCtx{
 		schedulingRequest:             *request,
-		promptText:                    getPromptText(request.Body),
+		promptText:                    promptText,
+		inputTokenCount:               len(strings.Fields(promptText)),
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
 		predictionsForScheduling:      make(map[string]endpointPredictionResult),
@@ -175,6 +184,12 @@ func (t *PredictedLatency) PreRequest(ctx context.Context, request *schedulingty
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now()
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
 
+	// Update per-pod token-in-flight counters and snapshot for training.
+	podKey := endpointName.String()
+	t.podCounter(&t.prefillTokensInFlight, podKey).Add(int64(predictedLatencyCtx.inputTokenCount))
+	predictedLatencyCtx.prefillTokensAtDispatch = t.podCounter(&t.prefillTokensInFlight, podKey).Load()
+	predictedLatencyCtx.decodeTokensAtDispatch = t.podCounter(&t.decodeTokensInFlight, podKey).Load()
+
 	processPreRequestForLatencyPrediction(ctx, predictedLatencyCtx)
 }
 
@@ -211,6 +226,8 @@ func (t *PredictedLatency) ResponseStreaming(ctx context.Context, request *sched
 		processTokenForLatencyPrediction(ctx, t.latencypredictor, t.config.EndpointRoleLabel, predictedLatencyCtx, targetMetadata, now, t.config.SamplingMean, t.config.MaxSampledTokens)
 	}
 
+	// Each streaming token (including the first) represents one decode step.
+	t.podCounter(&t.decodeTokensInFlight, targetMetadata.NamespacedName.String()).Add(1)
 }
 
 func (t *PredictedLatency) ResponseComplete(ctx context.Context, request *schedulingtypes.LLMRequest, response *requestcontrol.Response, metadata *fwkdl.EndpointMetadata) {
@@ -271,11 +288,18 @@ func (t *PredictedLatency) ResponseComplete(ctx context.Context, request *schedu
 				0, // not used for TPOT prediction
 				0, // TPOT does not use prefix cache score
 			)
+			entry.PrefillTokensInFlight = predictedLatencyCtx.prefillTokensAtDispatch
+			entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
 			if err := t.latencypredictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
 				logger.V(logutil.DEBUG).Error(err, "record TPOT training failed")
 			}
 		}
 	}
+
+	// Decrement per-pod token-in-flight counters now that the request is complete.
+	podKey := targetMetadata.NamespacedName.String()
+	t.podCounter(&t.prefillTokensInFlight, podKey).Add(-int64(predictedLatencyCtx.inputTokenCount))
+	t.podCounter(&t.decodeTokensInFlight, podKey).Add(-int64(predictedLatencyCtx.generatedTokenCount))
 
 	id := request.Headers[requtil.RequestIdHeaderKey]
 	t.removeRequestFromQueue(id, predictedLatencyCtx)
