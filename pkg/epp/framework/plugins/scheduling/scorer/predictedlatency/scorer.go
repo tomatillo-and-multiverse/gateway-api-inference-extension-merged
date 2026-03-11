@@ -46,7 +46,6 @@ type PredictedLatency struct {
 	headroomStrategy      headroomStrategy
 	config                Config
 	prefillTokensInFlight sync.Map // Key: pod NamespacedName.String(), Value: *atomic.Int64
-	decodeTokensInFlight  sync.Map // Key: pod NamespacedName.String(), Value: *atomic.Int64
 }
 
 // podCounter returns the atomic counter for the given pod key, creating it if necessary.

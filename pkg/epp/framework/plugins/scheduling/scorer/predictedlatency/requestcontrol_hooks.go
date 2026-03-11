@@ -185,10 +185,17 @@ func (t *PredictedLatency) PreRequest(ctx context.Context, request *schedulingty
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
 
 	// Update per-pod token-in-flight counters and snapshot for training.
-	podKey := endpointName.String()
-	t.podCounter(&t.prefillTokensInFlight, podKey).Add(int64(predictedLatencyCtx.inputTokenCount))
-	predictedLatencyCtx.prefillTokensAtDispatch = t.podCounter(&t.prefillTokensInFlight, podKey).Load()
-	predictedLatencyCtx.decodeTokensAtDispatch = t.podCounter(&t.decodeTokensInFlight, podKey).Load()
+	// prefillTokensInFlight is tracked on both the prefill pod (if disaggregated) and the decode pod.
+	// decodeTokensInFlight is zeroed out — it is only accurate in pure streaming mode,
+	// and kv_cache_percentage already captures decode load sufficiently.
+	decodePodKey := endpointName.String()
+	if predictedLatencyCtx.prefillTargetMetadata != nil {
+		prefillPodKey := predictedLatencyCtx.prefillTargetMetadata.NamespacedName.String()
+		t.podCounter(&t.prefillTokensInFlight, prefillPodKey).Add(int64(predictedLatencyCtx.inputTokenCount))
+	}
+	t.podCounter(&t.prefillTokensInFlight, decodePodKey).Add(int64(predictedLatencyCtx.inputTokenCount))
+	predictedLatencyCtx.prefillTokensAtDispatch = t.podCounter(&t.prefillTokensInFlight, decodePodKey).Load()
+	predictedLatencyCtx.decodeTokensAtDispatch = 0
 
 	processPreRequestForLatencyPrediction(ctx, predictedLatencyCtx)
 }
@@ -226,8 +233,6 @@ func (t *PredictedLatency) ResponseStreaming(ctx context.Context, request *sched
 		processTokenForLatencyPrediction(ctx, t.latencypredictor, t.config.EndpointRoleLabel, predictedLatencyCtx, targetMetadata, now, t.config.SamplingMean, t.config.MaxSampledTokens)
 	}
 
-	// Each streaming token (including the first) represents one decode step.
-	t.podCounter(&t.decodeTokensInFlight, targetMetadata.NamespacedName.String()).Add(1)
 }
 
 func (t *PredictedLatency) ResponseComplete(ctx context.Context, request *schedulingtypes.LLMRequest, response *requestcontrol.Response, metadata *fwkdl.EndpointMetadata) {
@@ -297,9 +302,18 @@ func (t *PredictedLatency) ResponseComplete(ctx context.Context, request *schedu
 	}
 
 	// Decrement per-pod token-in-flight counters now that the request is complete.
-	podKey := targetMetadata.NamespacedName.String()
-	t.podCounter(&t.prefillTokensInFlight, podKey).Add(-int64(predictedLatencyCtx.inputTokenCount))
-	t.podCounter(&t.decodeTokensInFlight, podKey).Add(-int64(predictedLatencyCtx.generatedTokenCount))
+	// Also clean up the map entry if the counter reaches zero, preventing stale entries
+	// from accumulating when pods are removed.
+	decodePodKey := targetMetadata.NamespacedName.String()
+	if predictedLatencyCtx.prefillTargetMetadata != nil {
+		prefillPodKey := predictedLatencyCtx.prefillTargetMetadata.NamespacedName.String()
+		if t.podCounter(&t.prefillTokensInFlight, prefillPodKey).Add(-int64(predictedLatencyCtx.inputTokenCount)) == 0 {
+			t.prefillTokensInFlight.Delete(prefillPodKey)
+		}
+	}
+	if t.podCounter(&t.prefillTokensInFlight, decodePodKey).Add(-int64(predictedLatencyCtx.inputTokenCount)) == 0 {
+		t.prefillTokensInFlight.Delete(decodePodKey)
+	}
 
 	id := request.Headers[requtil.RequestIdHeaderKey]
 	t.removeRequestFromQueue(id, predictedLatencyCtx)
