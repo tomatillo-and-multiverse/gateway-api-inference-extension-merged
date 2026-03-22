@@ -19,32 +19,51 @@ data:
         insecureSkipVerify: {{ .Values.inferenceExtension.metricsDataSource.insecureSkipVerify | default true }}
     - type: core-metrics-extractor
     {{- if .Values.inferenceExtension.latencyPredictor.enabled }}
-    - type: predicted-latency-scorer
+    - type: latency-predictor
       parameters:
         {{- with .Values.inferenceExtension.latencyPredictor.sloAwareRouting | default dict }}
         samplingMean: {{ .samplingMean | default 1000.0 }}
         maxSampledTokens: {{ .maxSampledTokens | default 20 }}
         sloBufferFactor: {{ .sloBufferFactor | default 1.0 }}
+        affinityGateTauGlobal: {{ .affinityGateTauGlobal | default 0.99 }}
+        {{- end }}
+    - type: latency-scorer
+      parameters:
+        {{- with .Values.inferenceExtension.latencyPredictor.sloAwareRouting | default dict }}
+        ttftWeight: {{ .headroomTTFTWeight | default 0.8 }}
+        tpotWeight: {{ .headroomTPOTWeight | default 0.2 }}
         negHeadroomTTFTWeight: {{ .negHeadroomTTFTWeight | default 0.8 }}
         negHeadroomTPOTWeight: {{ .negHeadroomTPOTWeight | default 0.2 }}
-        headroomTTFTWeight: {{ .headroomTTFTWeight | default 0.8 }}
-        headroomTPOTWeight: {{ .headroomTPOTWeight | default 0.2 }}
-        headroomSelectionStrategy: {{ .headroomSelectionStrategy | default "least" | quote }}
+        epsilonExploreNeg: {{ .epsilonExploreNeg | default 0.01 }}
+        affinityGateTau: {{ .affinityGateTau | default 0.80 }}
+        epsilonExploreSticky: {{ .epsilonExploreSticky | default 0.01 }}
+        affinityMaxTTFTPenaltyMs: {{ .affinityMaxTTFTPenaltyMs | default 5000.0 }}
         compositeKVWeight: {{ .compositeKVWeight | default 1.0 }}
         compositeQueueWeight: {{ .compositeQueueWeight | default 1.0 }}
         compositePrefixWeight: {{ .compositePrefixWeight | default 1.0 }}
-        epsilonExploreSticky: {{ .epsilonExploreSticky | default 0.01 }}
-        epsilonExploreNeg: {{ .epsilonExploreNeg | default 0.01 }}
-        affinityGateTau: {{ .affinityGateTau | default 0.80 }}
+        {{- end }}
+    - type: affinity-weighted-picker
+      parameters:
+        {{- with .Values.inferenceExtension.latencyPredictor.sloAwareRouting | default dict }}
+        tau: {{ .affinityGateTauGlobal | default 0.99 }}
+        tauLocal: {{ .affinityGateTau | default 0.80 }}
+        epsilonExplore: {{ .epsilonExploreSticky | default 0.01 }}
+        maxTTFTPenaltyMs: {{ .affinityMaxTTFTPenaltyMs | default 5000.0 }}
+        {{- end }}
+    - type: latency-admission
+      parameters:
+        {{- with .Values.inferenceExtension.latencyPredictor.sloAwareRouting | default dict }}
         affinityGateTauGlobal: {{ .affinityGateTauGlobal | default 0.99 }}
-        selectionMode: {{ .selectionMode | default "linear" | quote }}
         {{- end }}
     {{- end }}
     schedulingProfiles:
     {{- if .Values.inferenceExtension.latencyPredictor.enabled }}
     - name: default
       plugins:
-      - pluginRef: predicted-latency-scorer
+      - pluginRef: latency-predictor
+      - pluginRef: latency-scorer
+        weight: 1
+      - pluginRef: affinity-weighted-picker
     featureGates:
       - prepareDataPlugins
     {{- else }}

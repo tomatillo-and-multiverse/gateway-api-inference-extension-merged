@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package requestcontrol contains helpers to decouple latency-predictor logic.
-package predictedlatency
+package predictor
 
 import (
 	"context"
@@ -104,7 +104,7 @@ func (s *PredictedLatency) generatePredictions(ctx context.Context, predictedLat
 			"ttftHeadroom", predResult.TTFTHeadroom,
 			"tpotValid", predResult.TPOTValid,
 			"ttftValid", predResult.TTFTValid,
-			"headroomStrategy", s.headroomStrategy)
+		)
 
 		predictions = append(predictions, predResult)
 	}

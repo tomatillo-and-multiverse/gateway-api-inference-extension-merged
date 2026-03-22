@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package predictedlatency
+package predictor
 
 import (
 	"context"
@@ -48,7 +48,6 @@ const (
 var _ requestcontrol.PreRequest = &PredictedLatency{}
 var _ requestcontrol.ResponseHeader = &PredictedLatency{}
 var _ requestcontrol.ResponseBody = &PredictedLatency{}
-var _ requestcontrol.AdmissionPlugin = &PredictedLatency{}
 
 type predictedLatencyCtx struct {
 	schedulingRequest         schedulingtypes.LLMRequest
@@ -335,27 +334,3 @@ func (t *PredictedLatency) checkPredictor(logger logr.Logger, metadata *fwkdl.En
 	return true
 }
 
-func (t *PredictedLatency) AdmitRequest(ctx context.Context, request *schedulingtypes.LLMRequest, endpoints []schedulingtypes.Endpoint) error {
-	logger := log.FromContext(ctx)
-	if request == nil {
-		// This should not happen as the framework should not call AdmitRequest with a nil request, but we defensively check to avoid panics
-		logger.V(logutil.DEBUG).Info("PredictedLatency.AdmitRequest: request is nil, skipping")
-		return nil
-	}
-
-	predictedLatencyCtx, err := t.getPredictedLatencyContextForRequest(request)
-	if err != nil {
-		// If we can't find the predictedLatency context, we log the error but allow the request to proceed. This is a fail-open approach to avoid rejecting requests due to internal errors in our plugin.
-		id := request.Headers[reqcommon.RequestIdHeaderKey]
-		logger.V(logutil.DEBUG).Error(err, "PredictedLatency.AdmitRequest: Failed to get PredictedLatency context for request", "requestID", id)
-		return nil
-	}
-
-	// If there is no valid pod for the request, reject it
-	if !predictedLatencyCtx.hasValidEndpoint && request.Objectives.Priority < 0 {
-		logger.V(logutil.DEBUG).Info("PredictedLatency.AdmitRequest: Rejecting a sheddable request as no valid endpoint available due to slo violation", "requestID", request.Headers[reqcommon.RequestIdHeaderKey])
-		return errors.New("no valid endpoint available to serve the request")
-	}
-
-	return nil
-}
