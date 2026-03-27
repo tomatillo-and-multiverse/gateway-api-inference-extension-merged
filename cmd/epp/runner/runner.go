@@ -83,6 +83,7 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics/collectors"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requestcontrol/requestdataproducer/inputprofiletracker"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requestcontrol/requestdataproducer/requestinputproducer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/saturationdetector/framework/plugins/concurrencydetector"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/saturationdetector/framework/plugins/latencydetector"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/saturationdetector/framework/plugins/utilizationdetector"
@@ -490,6 +491,7 @@ func (r *Runner) registerInTreePlugins() {
 	// register saturation detector plugins
 	fwkplugin.Register(concurrencydetector.ConcurrencyDetectorType, concurrencydetector.ConcurrencyDetectorFactory)
 	fwkplugin.Register(utilizationdetector.UtilizationDetectorType, utilizationdetector.UtilizationDetectorFactory)
+	fwkplugin.Register(requestinputproducer.RequestInputProducerType, requestinputproducer.ProducerFactory)
 	fwkplugin.Register(inputprofiletracker.InputProfileTrackerType, inputprofiletracker.TrackerFactory)
 	fwkplugin.Register(latencydetector.LatencyDetectorType, latencydetector.LatencyDetectorFactory)
 }

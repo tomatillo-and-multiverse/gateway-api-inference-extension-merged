@@ -28,6 +28,7 @@ import (
 	framework "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 	attrinputprofile "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/inputprofile"
 	attrprefix "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	attrreqinput "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/requestinput"
 )
 
 func makeEndpoint(name string) framework.Endpoint {
@@ -36,6 +37,11 @@ func makeEndpoint(name string) framework.Endpoint {
 		&fwkdl.Metrics{UpdateTime: time.Now()},
 		nil,
 	)
+}
+
+// setRequestInput simulates request-input-producer having run before the tracker.
+func setRequestInput(ep framework.Endpoint, tokenCount int) {
+	ep.Put(attrreqinput.RequestInputInfoKey, attrreqinput.NewRequestInputInfo(tokenCount))
 }
 
 func TestTracker_ProbeProfile_Fallback(t *testing.T) {
@@ -87,8 +93,8 @@ func TestTracker_ProbeProfile_P90(t *testing.T) {
 		eff := i * 10
 		tracker.record(observation{
 			timestamp:            now,
-			inputTokens:          eff * 2,     // 2x effective (50% cache)
-			prefixCacheScore:     0.5,          // 50% cache hit
+			inputTokens:          eff * 2, // 2x effective (50% cache)
+			prefixCacheScore:     0.5,
 			effectiveInputTokens: eff,
 		})
 	}
@@ -152,28 +158,20 @@ func TestTracker_PrepareRequestData(t *testing.T) {
 		Percentile:     50,
 	})
 
-	request := &framework.LLMRequest{
-		Body: &framework.LLMRequestBody{
-			Completions: &framework.CompletionsRequest{
-				Prompt: "the quick brown fox jumps over the lazy dog",
-			},
-		},
-	}
-
-	// Create an endpoint with prefix cache info (3/10 = 0.3 cache score).
+	// Create an endpoint with RequestInputInfo (from request-input-producer) and prefix cache info.
 	ep := makeEndpoint("pod1")
+	setRequestInput(ep, 9) // 9 words
 	ep.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(3, 10, 16))
 
-	err := tracker.PrepareRequestData(context.Background(), request, []framework.Endpoint{ep})
+	err := tracker.PrepareRequestData(context.Background(), nil, []framework.Endpoint{ep})
 	require.NoError(t, err)
 
-	// Word count of prompt = 9 tokens, prefix cache = 0.3.
-	// Effective = round(9 * 0.7) = 6.
+	// 9 tokens, prefix cache = 0.3, effective = round(9 * 0.7) = 6.
 	tokens, cache := tracker.ProbeProfile(0, 0)
 	require.Equal(t, 9, tokens)
 	require.InDelta(t, 0.3, cache, 1e-6)
 
-	// Verify the attribute was set on the endpoint.
+	// Verify the InputProfileInfo attribute was set on the endpoint.
 	raw, ok := ep.Get(attrinputprofile.InputProfileInfoKey)
 	require.True(t, ok, "InputProfileInfo attribute should be set on endpoint")
 	info := raw.(*attrinputprofile.InputProfileInfo)
@@ -189,22 +187,32 @@ func TestTracker_PrepareRequestData_NoCacheInfo(t *testing.T) {
 		Percentile:     50,
 	})
 
-	request := &framework.LLMRequest{
-		Body: &framework.LLMRequestBody{
-			Completions: &framework.CompletionsRequest{
-				Prompt: "one two three four five",
-			},
-		},
-	}
-
 	ep := makeEndpoint("pod1")
-	err := tracker.PrepareRequestData(context.Background(), request, []framework.Endpoint{ep})
+	setRequestInput(ep, 500)
+
+	err := tracker.PrepareRequestData(context.Background(), nil, []framework.Endpoint{ep})
 	require.NoError(t, err)
 
-	// No prefix cache → cache score = 0, effective = word count = 5.
+	// No prefix cache → cache score = 0, effective = 500.
 	tokens, cache := tracker.ProbeProfile(0, 0)
-	require.Equal(t, 5, tokens)
+	require.Equal(t, 500, tokens)
 	require.InDelta(t, 0.0, cache, 1e-6)
+}
+
+func TestTracker_PrepareRequestData_NoInputInfo(t *testing.T) {
+	tracker := NewTracker(Config{
+		WindowDuration: 5 * time.Minute,
+		MaxSamples:     100,
+		Percentile:     50,
+	})
+
+	// No RequestInputInfo on endpoint → nothing recorded.
+	ep := makeEndpoint("pod1")
+	err := tracker.PrepareRequestData(context.Background(), nil, []framework.Endpoint{ep})
+	require.NoError(t, err)
+
+	tokens, _ := tracker.ProbeProfile(42, 0)
+	require.Equal(t, 42, tokens) // Fallback.
 }
 
 func TestTracker_TypedName(t *testing.T) {
@@ -214,20 +222,13 @@ func TestTracker_TypedName(t *testing.T) {
 	require.Equal(t, InputProfileTrackerType, tn.Name)
 }
 
-func TestEstimateInputTokens(t *testing.T) {
-	// Uses word count to match training server heuristic.
-	request := &framework.LLMRequest{
-		Body: &framework.LLMRequestBody{
-			Completions: &framework.CompletionsRequest{
-				Prompt: "one two three",
-			},
-		},
-	}
-	require.Equal(t, 3, estimateInputTokens(request))
+func TestReadInputTokenCount(t *testing.T) {
+	ep := makeEndpoint("pod1")
+	setRequestInput(ep, 42)
 
-	// No body → 0.
-	require.Equal(t, 0, estimateInputTokens(&framework.LLMRequest{}))
-	require.Equal(t, 0, estimateInputTokens(nil))
+	require.Equal(t, 42, readInputTokenCount([]framework.Endpoint{ep}))
+	require.Equal(t, 0, readInputTokenCount([]framework.Endpoint{makeEndpoint("pod2")}))
+	require.Equal(t, 0, readInputTokenCount(nil))
 }
 
 func TestPercentileIndex(t *testing.T) {

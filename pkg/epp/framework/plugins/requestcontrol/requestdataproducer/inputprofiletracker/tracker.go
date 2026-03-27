@@ -30,7 +30,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +41,7 @@ import (
 	framework "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 	attrinputprofile "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/inputprofile"
 	attrprefix "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	attrreqinput "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/requestinput"
 )
 
 const (
@@ -128,12 +128,13 @@ func (t *Tracker) TypedName() fwkplugin.TypedName {
 	}
 }
 
-// PrepareRequestData observes the request's input token count and prefix cache scores,
-// computes effective input, and produces InputProfileInfo on each endpoint.
-func (t *Tracker) PrepareRequestData(ctx context.Context, request *framework.LLMRequest, endpoints []framework.Endpoint) error {
+// PrepareRequestData reads the input token count from RequestInputInfo (produced by
+// request-input-producer), reads prefix cache scores, computes effective input, and
+// produces InputProfileInfo on each endpoint.
+func (t *Tracker) PrepareRequestData(ctx context.Context, _ *framework.LLMRequest, endpoints []framework.Endpoint) error {
 	logger := log.FromContext(ctx)
 
-	inputTokens := estimateInputTokens(request)
+	inputTokens := readInputTokenCount(endpoints)
 	if inputTokens <= 0 {
 		return nil
 	}
@@ -179,9 +180,12 @@ func (t *Tracker) Produces() map[string]any {
 	}
 }
 
-// Consumes declares that this plugin reads prefix cache match info from endpoints (if available).
+// Consumes declares that this plugin reads RequestInputInfo and PrefixCacheMatchInfo from endpoints.
 func (t *Tracker) Consumes() map[string]any {
-	return map[string]any{attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{}}
+	return map[string]any{
+		attrreqinput.RequestInputInfoKey:    attrreqinput.RequestInputInfo{},
+		attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{},
+	}
 }
 
 // ProbeProfile returns the (inputTokens, prefixCacheScore) pair from the observation at
@@ -229,14 +233,20 @@ func (t *Tracker) validObservations() []observation {
 	return valid
 }
 
-// estimateInputTokens returns the input token count using the same word-count heuristic
-// that the latency predictor training server uses: len(strings.Fields(promptText)).
-// This must stay consistent with the training data so the probe represents reality.
-func estimateInputTokens(request *framework.LLMRequest) int {
-	if request == nil || request.Body == nil {
-		return 0
+// readInputTokenCount reads the input token count from RequestInputInfo on any endpoint.
+// The attribute is set identically on all endpoints by request-input-producer.
+func readInputTokenCount(endpoints []framework.Endpoint) int {
+	for _, ep := range endpoints {
+		raw, ok := ep.Get(attrreqinput.RequestInputInfoKey)
+		if !ok {
+			continue
+		}
+		info, ok := raw.(*attrreqinput.RequestInputInfo)
+		if ok && info != nil {
+			return info.InputTokenCount()
+		}
 	}
-	return len(strings.Fields(request.Body.PromptText()))
+	return 0
 }
 
 // meanPrefixCacheScore computes the mean prefix cache score across all endpoints.
