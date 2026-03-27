@@ -444,6 +444,24 @@ var (
 		},
 		[]string{"inference_pool"},
 	)
+
+	latencyDetectorEndpointSaturation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: inferenceExtension,
+			Name:      "latency_detector_endpoint_saturation",
+			Help:      metricsutil.HelpMsgWithStability("Predicted saturation per endpoint from the latency detector probe (predicted_latency / SLO). Values: <1.0 = headroom, >=1.0 = at/over SLO.", compbasemetrics.ALPHA),
+		},
+		[]string{"endpoint"},
+	)
+
+	latencyDetectorPoolSaturation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: inferenceExtension,
+			Name:      "latency_detector_pool_saturation",
+			Help:      metricsutil.HelpMsgWithStability("Aggregate predicted saturation from the latency detector probe, averaged across all endpoints.", compbasemetrics.ALPHA),
+		},
+		[]string{},
+	)
 )
 
 // --- Inference Model Rewrite Metrics ---
@@ -502,6 +520,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(flowControlQueueBytes)
 		metrics.Registry.MustRegister(flowControlPoolSaturation)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
+		metrics.Registry.MustRegister(latencyDetectorEndpointSaturation)
+		metrics.Registry.MustRegister(latencyDetectorPoolSaturation)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -551,6 +571,8 @@ func Reset() {
 	flowControlQueueBytes.Reset()
 	flowControlPoolSaturation.Reset()
 	flowControlRequestEnqueueDuration.Reset()
+	latencyDetectorEndpointSaturation.Reset()
+	latencyDetectorPoolSaturation.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 }
 
@@ -883,6 +905,16 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 // RecordFlowControlPoolSaturation records the current saturation level for an inference pool.
 func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+}
+
+// RecordLatencyDetectorEndpointSaturation records the predicted saturation for a single endpoint.
+func RecordLatencyDetectorEndpointSaturation(endpoint string, saturation float64) {
+	latencyDetectorEndpointSaturation.WithLabelValues(endpoint).Set(saturation)
+}
+
+// RecordLatencyDetectorPoolSaturation records the aggregate predicted saturation from the probe.
+func RecordLatencyDetectorPoolSaturation(saturation float64) {
+	latencyDetectorPoolSaturation.WithLabelValues().Set(saturation)
 }
 
 // SetTTFTSLOThreshold sets the TTFT SLO threshold for a model.
