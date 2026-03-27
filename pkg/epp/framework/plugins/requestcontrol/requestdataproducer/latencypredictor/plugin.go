@@ -39,6 +39,7 @@ import (
 	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	framework "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
+	attrreqinput "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/requestinput"
 	latencypredictor "sigs.k8s.io/gateway-api-inference-extension/sidecars/latencypredictorasync"
 )
 
@@ -204,10 +205,10 @@ func (s *PredictedLatency) WithName(name string) *PredictedLatency {
 	return s
 }
 
-func (t *PredictedLatency) getOrMakePredictedLatencyContextForRequest(request *framework.LLMRequest) *predictedLatencyCtx {
+func (t *PredictedLatency) getOrMakePredictedLatencyContextForRequest(request *framework.LLMRequest, endpoints []framework.Endpoint) *predictedLatencyCtx {
 	sloCtx, err := t.getPredictedLatencyContextForRequest(request)
 	if err != nil {
-		sloCtx = newPredictedLatencyContext(request)
+		sloCtx = newPredictedLatencyContext(request, endpoints)
 	}
 	return sloCtx
 }
@@ -248,19 +249,42 @@ type predictedLatencyCtx struct {
 	decodeTokensAtDispatch           int64
 }
 
-func newPredictedLatencyContext(request *framework.LLMRequest) *predictedLatencyCtx {
+func newPredictedLatencyContext(request *framework.LLMRequest, endpoints []framework.Endpoint) *predictedLatencyCtx {
 	var promptText string
 	if request.Body != nil {
 		promptText = request.Body.PromptText()
 	}
+
+	// Read input token count from RequestInputInfo if request-input-producer has run.
+	// Fall back to word count for backward compatibility.
+	inputTokenCount := readInputTokenCountFromEndpoints(endpoints)
+	if inputTokenCount == 0 {
+		inputTokenCount = len(strings.Fields(promptText))
+	}
+
 	return &predictedLatencyCtx{
 		schedulingRequest:             *request,
 		promptText:                    promptText,
-		inputTokenCount:               len(strings.Fields(promptText)),
+		inputTokenCount:               inputTokenCount,
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
 		predictionsForScheduling:      make(map[string]endpointPredictionResult),
 	}
+}
+
+// readInputTokenCountFromEndpoints reads InputTokenCount from the RequestInputInfo attribute.
+func readInputTokenCountFromEndpoints(endpoints []framework.Endpoint) int {
+	for _, ep := range endpoints {
+		raw, ok := ep.Get(attrreqinput.RequestInputInfoKey)
+		if !ok {
+			continue
+		}
+		info, ok := raw.(*attrreqinput.RequestInputInfo)
+		if ok && info != nil {
+			return info.InputTokenCount()
+		}
+	}
+	return 0
 }
 
 func (s *PredictedLatency) getPredictedLatencyContextForRequest(request *framework.LLMRequest) (*predictedLatencyCtx, error) {

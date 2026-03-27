@@ -75,7 +75,7 @@ func createTestRouter() *PredictedLatency {
 func TestNewPredictedLatencyContext(t *testing.T) {
 	request := createTestLLMRequest("test", 100, 50)
 
-	ctx := newPredictedLatencyContext(request)
+	ctx := newPredictedLatencyContext(request, nil)
 
 	assert.NotNil(t, ctx)
 	assert.Equal(t, *request, ctx.schedulingRequest)
@@ -92,7 +92,7 @@ func TestNewPredictedLatencyContext_NilBody(t *testing.T) {
 		Headers: map[string]string{reqcommon.RequestIdHeaderKey: "test-nil-body"},
 		Body:    nil,
 	}
-	ctx := newPredictedLatencyContext(request)
+	ctx := newPredictedLatencyContext(request, nil)
 
 	assert.NotNil(t, ctx)
 	assert.Empty(t, ctx.promptText)
@@ -100,7 +100,7 @@ func TestNewPredictedLatencyContext_NilBody(t *testing.T) {
 
 func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 	request := createTestChatCompletionsLLMRequest("test-chat", 1.0, 0.05)
-	ctx := newPredictedLatencyContext(request)
+	ctx := newPredictedLatencyContext(request, nil)
 
 	assert.NotNil(t, ctx)
 	assert.Equal(t, "You are a helpful assistant. Tell me a joke. ", ctx.promptText)
@@ -109,7 +109,7 @@ func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 func TestPredictedLatency_SetAndGetSLOContext(t *testing.T) {
 	router := createTestRouter()
 	request := createTestLLMRequest("test", 100, 50)
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 
 	// Set context
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -136,7 +136,7 @@ func TestPredictedLatency_GetSLOContext_NotFound(t *testing.T) {
 func TestPredictedLatency_DeleteSLOContext(t *testing.T) {
 	router := createTestRouter()
 	request := createTestLLMRequest("test", 100, 50)
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 
 	// Set and then delete context
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -189,7 +189,7 @@ func TestPredictedLatency_PreRequest_Success(t *testing.T) {
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
 	// Create and set initial SLO context
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
@@ -222,7 +222,7 @@ func TestPredictedLatency_PreRequest_AddsToQueue(t *testing.T) {
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
 	// Create and set initial SLO context
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
@@ -249,11 +249,11 @@ func TestPredictedLatency_PreRequest_QueueAlreadyExists(t *testing.T) {
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
 	// Create and set initial SLO contexts
-	predictedLatencyCtx1 := newPredictedLatencyContext(request1)
+	predictedLatencyCtx1 := newPredictedLatencyContext(request1, nil)
 	predictedLatencyCtx1.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request1, predictedLatencyCtx1)
 
-	predictedLatencyCtx2 := newPredictedLatencyContext(request2)
+	predictedLatencyCtx2 := newPredictedLatencyContext(request2, nil)
 	predictedLatencyCtx2.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request2, predictedLatencyCtx2)
 	// Add first request
@@ -277,7 +277,7 @@ func TestPredictedLatency_ResponseHeader_NilPredictor(t *testing.T) {
 	request := createTestLLMRequest("test", 100, 50)
 	response := &requestcontrol.Response{}
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	// Should not panic and should return early
@@ -297,7 +297,7 @@ func TestPredictedLatency_ResponseHeader_NoPod(t *testing.T) {
 	request := createTestLLMRequest("test", 100, 50)
 	response := &requestcontrol.Response{}
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	// Should not panic with nil pod
@@ -333,7 +333,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_NilPredictor(t *testing.T) 
 	request := createTestLLMRequest("test", 100, 50)
 	response := &requestcontrol.Response{}
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	// Should not panic and should return early
@@ -354,7 +354,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FirstToken(t *testing.T) {
 	response := &requestcontrol.Response{}
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-100 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
@@ -411,7 +411,7 @@ func TestPredictedLatency_NonStreamingMode_ResponseBody_FirstToken(t *testing.T)
 	response := &requestcontrol.Response{} // EndOfStream is false
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-100 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
@@ -440,7 +440,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_SubsequentTokens(t *testing
 	response := &requestcontrol.Response{}
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now()
 	predictedLatencyCtx.schedulingResult = schedulingResult
@@ -488,7 +488,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_QueueNotFound(t 
 	request := createTestLLMRequest("test", 100, 50)
 	response := &requestcontrol.Response{EndOfStream: true}
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.incomingModelName = testModelName
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata() // ADD THIS to avoid other issues
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -535,7 +535,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_Success(t *testi
 	router.runningRequestLists.Store(endpoint.GetMetadata().NamespacedName, queue)
 	queue.Add(request.Headers[reqcommon.RequestIdHeaderKey], 50.0)
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.ttft = 80
 	predictedLatencyCtx.avgTPOT = 30
 	predictedLatencyCtx.predictedTTFT = 85
@@ -565,7 +565,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_NilPredictor(t *
 	request := createTestLLMRequest("test", 100, 50)
 	response := &requestcontrol.Response{EndOfStream: true}
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	// Should not panic
@@ -585,7 +585,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_NoPod(t *testing
 	request := createTestLLMRequest("test", 100, 50)
 	response := &requestcontrol.Response{}
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	// Should not panic with nil pod
@@ -625,7 +625,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_WithMetrics(t *t
 	router.runningRequestLists.Store(endpoint.GetMetadata().NamespacedName, queue)
 	queue.Add(request.Headers[reqcommon.RequestIdHeaderKey], 50.0)
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.ttft = 80
 	predictedLatencyCtx.avgTPOT = 30
 	predictedLatencyCtx.predictedTTFT = 85
@@ -658,7 +658,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_NoSLOs(t *testin
 	router.runningRequestLists.Store(endpoint.GetMetadata().NamespacedName, queue)
 	queue.Add(request.Headers[reqcommon.RequestIdHeaderKey], 0)
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.ttft = 80
 	predictedLatencyCtx.avgTPOT = 30
 	predictedLatencyCtx.incomingModelName = testModelName
@@ -684,7 +684,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken(t *testing.T) {
 	response := &requestcontrol.Response{EndOfStream: true} // True
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
@@ -717,7 +717,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_SingleChunk(t *testing.T) {
 	response := &requestcontrol.Response{EndOfStream: true} // True
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-150 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
@@ -750,7 +750,7 @@ func TestPredictedLatency_NonStreamingMode_ResponseBody_FinalToken(t *testing.T)
 	response := &requestcontrol.Response{EndOfStream: true} // True
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-300 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
@@ -805,7 +805,7 @@ func TestPredictedLatency_CheckPredictor_Success(t *testing.T) {
 
 func TestPredictedLatencyContext_Fields(t *testing.T) {
 	request := createTestLLMRequest("test", 100, 50)
-	ctx := newPredictedLatencyContext(request)
+	ctx := newPredictedLatencyContext(request, nil)
 
 	// Test all field initialization
 	assert.NotNil(t, ctx.lastSeenMetrics)
@@ -824,7 +824,7 @@ func TestPredictedLatencyContext_Fields(t *testing.T) {
 
 func TestPredictedLatencyContext_UpdateMetrics(t *testing.T) {
 	request := createTestLLMRequest("test", 100, 50)
-	ctx := newPredictedLatencyContext(request)
+	ctx := newPredictedLatencyContext(request, nil)
 
 	// Add some metrics
 	metricsState := &fwkdl.Metrics{
@@ -840,7 +840,7 @@ func TestPredictedLatencyContext_UpdateMetrics(t *testing.T) {
 
 func TestPredictedLatencyContext_PredictionData(t *testing.T) {
 	request := createTestLLMRequest("test", 100, 50)
-	ctx := newPredictedLatencyContext(request)
+	ctx := newPredictedLatencyContext(request, nil)
 
 	ctx.predictionsForScheduling = make(map[string]endpointPredictionResult)
 
@@ -855,7 +855,7 @@ func TestPredictedLatencyContext_PredictionData(t *testing.T) {
 
 func TestPredictedLatencyContext_PrefixCacheScores(t *testing.T) {
 	request := createTestLLMRequest("test", 100, 50)
-	ctx := newPredictedLatencyContext(request)
+	ctx := newPredictedLatencyContext(request, nil)
 
 	// Set prefix cache scores
 	ctx.prefixCacheScoresForEndpoints["pod1"] = 0.8
@@ -881,7 +881,7 @@ func TestPredictedLatency_ConcurrentContextAccess(t *testing.T) {
 
 			requestID := uuid.New().String()
 			request := createTestLLMRequest(requestID, 100, 50)
-			predictedLatencyCtx := newPredictedLatencyContext(request)
+			predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 
 			// Set context
 			router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -915,7 +915,7 @@ func TestPredictedLatency_MultipleRequests_SamePod(t *testing.T) {
 
 	// Create and set SLO contexts
 	for _, req := range []*schedulingtypes.LLMRequest{request1, request2, request3} {
-		predictedLatencyCtx := newPredictedLatencyContext(req)
+		predictedLatencyCtx := newPredictedLatencyContext(req, nil)
 		predictedLatencyCtx.avgTPOTSLO = 50
 		router.setPredictedLatencyContextForRequest(req, predictedLatencyCtx)
 	}
@@ -943,7 +943,7 @@ func TestPredictedLatency_RequestLifecycle_ResponseEndOfStream(t *testing.T) {
 	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
 
 	// Create initial context
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 	predictedLatencyCtx.avgTPOTSLO = 50
 	predictedLatencyCtx.incomingModelName = testModelName
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -998,11 +998,11 @@ func TestPredictedLatency_MultipleRequests_DifferentPods(t *testing.T) {
 	schedulingResult2 := createTestSchedulingResult(endpoint2.GetMetadata())
 
 	// Create and set SLO contexts
-	predictedLatencyCtx1 := newPredictedLatencyContext(request1)
+	predictedLatencyCtx1 := newPredictedLatencyContext(request1, nil)
 	predictedLatencyCtx1.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request1, predictedLatencyCtx1)
 
-	predictedLatencyCtx2 := newPredictedLatencyContext(request2)
+	predictedLatencyCtx2 := newPredictedLatencyContext(request2, nil)
 	predictedLatencyCtx2.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request2, predictedLatencyCtx2)
 	// Add requests to different pods
@@ -1058,7 +1058,7 @@ func TestPredictedLatencyContext_SLOValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			request := createTestLLMRequest("test-id", tt.ttftSLO, tt.tpotSLO)
-			ctx := newPredictedLatencyContext(request)
+			ctx := newPredictedLatencyContext(request, nil)
 			ctx.ttftSLO = tt.ttftSLO
 			ctx.avgTPOTSLO = tt.tpotSLO
 
@@ -1080,7 +1080,7 @@ func BenchmarkPredictedLatency_PreRequest(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		requestID := uuid.New().String()
 		request := createTestLLMRequest(requestID, 100, 50)
-		predictedLatencyCtx := newPredictedLatencyContext(request)
+		predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 		predictedLatencyCtx.avgTPOTSLO = 50
 		router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 		router.PreRequest(ctx, request, schedulingResult)
@@ -1090,7 +1090,7 @@ func BenchmarkPredictedLatency_PreRequest(b *testing.B) {
 func BenchmarkPredictedLatency_ContextOperations(b *testing.B) {
 	router := createTestRouter()
 	request := createTestLLMRequest("test", 100, 50)
-	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx := newPredictedLatencyContext(request, nil)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1105,6 +1105,6 @@ func BenchmarkPredictedLatencyContext_Creation(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = newPredictedLatencyContext(request)
+		_ = newPredictedLatencyContext(request, nil)
 	}
 }

@@ -392,7 +392,7 @@ func TestSloContextStoreEviction(t *testing.T) {
 		NamespacedName: endpointName,
 	}
 
-	sloCtx := newPredictedLatencyContext(req)
+	sloCtx := newPredictedLatencyContext(req, nil)
 	sloCtx.targetMetadata = metadata
 	sloCtx.avgTPOTSLO = 0.05
 

@@ -27,6 +27,7 @@ import (
 	schedulingtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 	attrlatency "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	attrreqinput "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/requestinput"
 )
 
 var _ requestcontrol.PrepareDataPlugin = &PredictedLatency{}
@@ -35,7 +36,7 @@ var _ requestcontrol.PrepareDataPlugin = &PredictedLatency{}
 // parsing SLO headers, gathering prefix cache scores, and generating predictions.
 func (s *PredictedLatency) PrepareRequestData(ctx context.Context, request *schedulingtypes.LLMRequest, endpoints []schedulingtypes.Endpoint) error {
 	logger := log.FromContext(ctx)
-	predictedLatencyCtx := s.getOrMakePredictedLatencyContextForRequest(request)
+	predictedLatencyCtx := s.getOrMakePredictedLatencyContextForRequest(request, endpoints)
 
 	s.parseSLOHeaders(ctx, request, predictedLatencyCtx)
 	var prefixCacheScore float64
@@ -102,5 +103,8 @@ func (p *PredictedLatency) Produces() map[string]any {
 }
 
 func (p *PredictedLatency) Consumes() map[string]any {
-	return map[string]any{attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{}}
+	return map[string]any{
+		attrprefix.PrefixCacheMatchInfoKey:  attrprefix.PrefixCacheMatchInfo{},
+		attrreqinput.RequestInputInfoKey: attrreqinput.RequestInputInfo{},
+	}
 }

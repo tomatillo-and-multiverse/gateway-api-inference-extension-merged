@@ -49,11 +49,11 @@ func TestBulkPredictWithMetrics(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod2"},
 		},
 	}
-	prompts := []string{"prompt1", "prompt2"}
+	inputTokenCounts := []int{1, 1}
 	generatedTokenCounts := []int{1, 1}
 	prefixCacheScores := []float64{0.0, 0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, inputTokenCounts, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 2)
@@ -76,11 +76,11 @@ func TestBulkPredictWithMetrics_Error(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1"}
+	inputTokenCounts := []int{1}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, inputTokenCounts, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -94,11 +94,11 @@ func TestBulkPredictWithMetrics_InputMismatch(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1", "prompt2"} // Mismatch length
+	inputTokenCounts := []int{1, 1} // Mismatch length with metrics (2 vs 1)
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, inputTokenCounts, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -120,7 +120,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1"}
+	inputTokenCounts := []int{1}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
@@ -131,7 +131,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 		incomingModelName: "incoming-model",
 	}
 
-	results, err := bulkPredictWithMetrics(context.Background(), plCtx, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), plCtx, mockPredictor, metricsStates, "", pods, inputTokenCounts, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -158,11 +158,11 @@ func TestBulkPredictWithMetrics_ChatCompletionsPrompt(t *testing.T) {
 			},
 		},
 	}
-	prompts := []string{chatBody.PromptText()}
+	inputTokenCounts := []int{len(strings.Fields(chatBody.PromptText()))}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mp, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, []int64{0})
+	results, err := bulkPredictWithMetrics(context.Background(), nil, mp, metricsStates, "", pods, inputTokenCounts, generatedTokenCounts, prefixCacheScores, []int64{0})
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -177,11 +177,11 @@ func TestBulkPredictWithMetrics_NilMetricsState(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1"}
+	inputTokenCounts := []int{1}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, inputTokenCounts, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
