@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	eppmetrics "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics"
 	fwkplugin "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requestcontrol"
 	framework "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
@@ -174,6 +175,7 @@ func (t *Tracker) PrepareRequestData(ctx context.Context, request *framework.LLM
 		for _, ep := range endpoints {
 			ep.Put(attrinputprofile.InputProfileInfoKey, profileInfo)
 		}
+		eppmetrics.RecordInputProfileTrackerStats(probeTokens, probeCache, probeEffective, t.observationCount())
 	}
 
 	logger.V(logutil.TRACE).Info("Input profile observation",
@@ -214,6 +216,13 @@ func (t *Tracker) ProbeProfile(fallbackTokens int, fallbackCache float64) (int, 
 
 	idx := percentileIndex(len(valid), t.config.Percentile)
 	return valid[idx].inputTokens, valid[idx].prefixCacheScore
+}
+
+// observationCount returns the number of valid (non-expired) observations.
+func (t *Tracker) observationCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.validObservations())
 }
 
 // record appends an observation to the ring buffer.

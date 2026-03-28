@@ -451,6 +451,15 @@ var (
 		},
 		[]string{"inference_pool"},
 	)
+
+	inputProfileTrackerStats = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: inferenceExtension,
+			Name:      "input_profile_tracker",
+			Help:      metricsutil.HelpMsgWithStability("Input profile tracker stats from observed traffic.", compbasemetrics.ALPHA),
+		},
+		[]string{"stat"},
+	)
 )
 
 // --- Inference Model Rewrite Metrics ---
@@ -510,6 +519,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(flowControlQueueBytes)
 		metrics.Registry.MustRegister(flowControlPoolSaturation)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
+		metrics.Registry.MustRegister(inputProfileTrackerStats)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -560,6 +570,7 @@ func Reset() {
 	flowControlQueueBytes.Reset()
 	flowControlPoolSaturation.Reset()
 	flowControlRequestEnqueueDuration.Reset()
+	inputProfileTrackerStats.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 }
 
@@ -896,6 +907,26 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 // RecordFlowControlPoolSaturation records the current saturation level for an inference pool.
 func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+}
+
+// RecordInputProfileTrackerStats records the current input profile tracker stats.
+func RecordInputProfileTrackerStats(probeInputTokens int, probePrefixCacheScore float64, probeEffectiveInput int, observationCount int) {
+	inputProfileTrackerStats.WithLabelValues("probe_input_tokens").Set(float64(probeInputTokens))
+	inputProfileTrackerStats.WithLabelValues("probe_prefix_cache_score").Set(probePrefixCacheScore)
+	inputProfileTrackerStats.WithLabelValues("probe_effective_input").Set(float64(probeEffectiveInput))
+	inputProfileTrackerStats.WithLabelValues("observation_count").Set(float64(observationCount))
+}
+
+// SetTTFTSLOThreshold sets the TTFT SLO threshold for a model.
+// This allows dynamic threshold management and makes the threshold visible in metrics.
+func SetTTFTSLOThreshold(modelName, targetModelName string, threshold float64) {
+	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOThreshold).Set(threshold)
+}
+
+// SetTPOTSLOThreshold sets the TPOT SLO threshold for a model.
+// This allows dynamic threshold management and makes the threshold visible in metrics.
+func SetTPOTSLOThreshold(modelName, targetModelName string, threshold float64) {
+	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOThreshold).Set(threshold)
 }
 
 // RecordInferenceModelRewriteDecision records the routing decision for InferenceModelRewrite.
