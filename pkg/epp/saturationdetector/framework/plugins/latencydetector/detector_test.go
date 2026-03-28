@@ -58,6 +58,14 @@ func makeSchedulingEndpoint(name string) framework.Endpoint {
 	)
 }
 
+func toProbeEndpoints(eps ...fwkdl.Endpoint) []probeEndpoint {
+	result := make([]probeEndpoint, len(eps))
+	for i, ep := range eps {
+		result[i] = ep
+	}
+	return result
+}
+
 func setLatencyInfo(ep framework.Endpoint, ttftHeadroom, tpotHeadroom, ttft, tpot float64) {
 	ttftValid := ttftHeadroom >= 0
 	tpotValid := tpotHeadroom >= 0
@@ -242,10 +250,10 @@ func TestDetector_Probe(t *testing.T) {
 	}
 
 	// Set up endpoints.
-	d.latestEndpoints = []fwkdl.Endpoint{
+	d.latestEndpoints = toProbeEndpoints(
 		makeDLEndpoint("pod1", 2, 5, 0.3),
 		makeDLEndpoint("pod2", 8, 10, 0.7),
-	}
+	)
 
 	d.probe(context.Background())
 
@@ -279,7 +287,7 @@ func TestDetector_Probe_Error_KeepsCachedValue(t *testing.T) {
 		perEndpointScore:    map[string]float64{"ns1/pod1": 0.3},
 		aggregateSaturation: 0.3,
 	}
-	d.latestEndpoints = []fwkdl.Endpoint{makeDLEndpoint("pod1", 1, 3, 0.2)}
+	d.latestEndpoints = toProbeEndpoints(makeDLEndpoint("pod1", 1, 3, 0.2))
 
 	d.probe(context.Background())
 
@@ -306,14 +314,14 @@ func TestDetector_Probe_NilMetrics(t *testing.T) {
 	}
 
 	// Endpoint with nil metrics.
-	d.latestEndpoints = []fwkdl.Endpoint{
+	d.latestEndpoints = toProbeEndpoints(
 		&backendmetrics.FakePodMetrics{
 			Metadata: &fwkdl.EndpointMetadata{
 				NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "ns1"},
 			},
 			Metrics: nil,
 		},
-	}
+	)
 
 	d.probe(context.Background())
 
@@ -469,7 +477,7 @@ func TestDetector_ProbeLoop_Integration(t *testing.T) {
 	}
 
 	// Set endpoints before starting the loop.
-	d.latestEndpoints = []fwkdl.Endpoint{makeDLEndpoint("pod1", 1, 3, 0.2)}
+	d.latestEndpoints = toProbeEndpoints(makeDLEndpoint("pod1", 1, 3, 0.2))
 
 	go d.probeLoop(ctx)
 

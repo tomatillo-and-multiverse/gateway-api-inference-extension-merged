@@ -66,6 +66,7 @@ import (
 	eppmetrics "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics"
 	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
 	fwkplugin "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requestcontrol"
 	framework "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 	attrlatency "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requestcontrol/requestdataproducer/inputprofiletracker"
@@ -134,7 +135,17 @@ func startPredictor(handle fwkplugin.Handle, logger logr.Logger) (latencypredict
 	return predictor, nil
 }
 
-var _ framework.Filter = &Detector{}
+var (
+	_ framework.Filter              = &Detector{}
+	_ requestcontrol.PrepareDataPlugin = &Detector{}
+)
+
+// probeEndpoint is the minimal interface the probe needs from an endpoint.
+// Both fwkdl.Endpoint and framework.Endpoint satisfy this implicitly.
+type probeEndpoint interface {
+	GetMetadata() *fwkdl.EndpointMetadata
+	GetMetrics() *fwkdl.Metrics
+}
 
 // Detector determines system saturation based on ML-predicted latency.
 type Detector struct {
@@ -149,9 +160,10 @@ type Detector struct {
 	aggregateSaturation float64
 	lastProbeTime       time.Time
 
-	// The most recent set of endpoints seen by Saturation(), used by the probe goroutine.
+	// The most recent set of endpoints, used by the probe goroutine.
+	// Populated by PrepareRequestData (every request) or Saturation() (admission path).
 	latestEndpointsMu sync.Mutex
-	latestEndpoints   []fwkdl.Endpoint
+	latestEndpoints   []probeEndpoint
 }
 
 // NewDetector creates a new latency-based saturation detector and starts the background probe loop.
@@ -204,8 +216,12 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //   - >= 1.0: pool is at or above SLO capacity
 func (d *Detector) Saturation(_ context.Context, candidatePods []fwkdl.Endpoint) float64 {
 	// Snapshot the latest endpoints for the background probe.
+	eps := make([]probeEndpoint, len(candidatePods))
+	for i, p := range candidatePods {
+		eps[i] = p
+	}
 	d.latestEndpointsMu.Lock()
-	d.latestEndpoints = candidatePods
+	d.latestEndpoints = eps
 	d.latestEndpointsMu.Unlock()
 
 	if len(candidatePods) == 0 {
@@ -216,6 +232,26 @@ func (d *Detector) Saturation(_ context.Context, candidatePods []fwkdl.Endpoint)
 	defer d.mu.RUnlock()
 	return d.aggregateSaturation
 }
+
+// PrepareRequestData snapshots the current endpoints so the background probe has
+// endpoints to work with, even when Saturation() is not being called (e.g., no
+// flow control enabled or no sheddable traffic).
+func (d *Detector) PrepareRequestData(_ context.Context, _ *framework.LLMRequest, endpoints []framework.Endpoint) error {
+	eps := make([]probeEndpoint, len(endpoints))
+	for i, ep := range endpoints {
+		eps[i] = ep
+	}
+	d.latestEndpointsMu.Lock()
+	d.latestEndpoints = eps
+	d.latestEndpointsMu.Unlock()
+	return nil
+}
+
+// Produces returns nil — this plugin doesn't produce endpoint attributes.
+func (d *Detector) Produces() map[string]any { return nil }
+
+// Consumes returns nil — endpoint snapshot doesn't depend on other attributes.
+func (d *Detector) Consumes() map[string]any { return nil }
 
 // Filter removes endpoints whose per-request predicted latency exceeds the SLO.
 //

@@ -39,7 +39,7 @@ inferenceExtension:
 
   flags:
     # Log verbosity
-    v: 1
+    v: 4
 
   affinity: {}
 
