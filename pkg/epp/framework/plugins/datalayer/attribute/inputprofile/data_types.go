@@ -30,32 +30,32 @@ const (
 // of effective input is selected, preserving both original values so the sidecar model
 // receives the same features it was trained on.
 type InputProfileInfo struct {
-	// inputTokens is the input token count (word count) from the representative request.
-	inputTokens int
+	// inputWords is the input word count from the representative request.
+	inputWords int
 	// prefixCacheScore is the prefix cache score from the representative request.
 	prefixCacheScore float64
-	// effectiveInputTokens is inputTokens * (1 - prefixCacheScore), used for
+	// effectiveInputWords is inputWords * (1 - prefixCacheScore), used for
 	// percentile ranking.
-	effectiveInputTokens int
+	effectiveInputWords int
 }
 
 // NewInputProfileInfo creates a new InputProfileInfo.
-func NewInputProfileInfo(inputTokens int, prefixCacheScore float64, effectiveInputTokens int) *InputProfileInfo {
+func NewInputProfileInfo(inputWords int, prefixCacheScore float64, effectiveInputWords int) *InputProfileInfo {
 	return &InputProfileInfo{
-		inputTokens:          inputTokens,
-		prefixCacheScore:     prefixCacheScore,
-		effectiveInputTokens: effectiveInputTokens,
+		inputWords:          inputWords,
+		prefixCacheScore:    prefixCacheScore,
+		effectiveInputWords: effectiveInputWords,
 	}
 }
 
-// InputTokens returns the input token count from the representative request.
-func (i *InputProfileInfo) InputTokens() int { return i.inputTokens }
+// InputWords returns the input word count from the representative request.
+func (i *InputProfileInfo) InputWords() int { return i.inputWords }
 
 // PrefixCacheScore returns the prefix cache score from the representative request.
 func (i *InputProfileInfo) PrefixCacheScore() float64 { return i.prefixCacheScore }
 
-// EffectiveInputTokens returns the effective input (inputTokens * (1 - prefixCacheScore)).
-func (i *InputProfileInfo) EffectiveInputTokens() int { return i.effectiveInputTokens }
+// EffectiveInputWords returns the effective input (inputWords * (1 - prefixCacheScore)).
+func (i *InputProfileInfo) EffectiveInputWords() int { return i.effectiveInputWords }
 
 // Clone implements fwkdl.Cloneable.
 func (i *InputProfileInfo) Clone() fwkdl.Cloneable {
@@ -63,8 +63,8 @@ func (i *InputProfileInfo) Clone() fwkdl.Cloneable {
 		return nil
 	}
 	return &InputProfileInfo{
-		inputTokens:          i.inputTokens,
-		prefixCacheScore:     i.prefixCacheScore,
-		effectiveInputTokens: i.effectiveInputTokens,
+		inputWords:          i.inputWords,
+		prefixCacheScore:    i.prefixCacheScore,
+		effectiveInputWords: i.effectiveInputWords,
 	}
 }

@@ -910,10 +910,10 @@ func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 }
 
 // RecordInputProfileTrackerStats records the current input profile tracker stats.
-func RecordInputProfileTrackerStats(probeInputTokens int, probePrefixCacheScore float64, probeEffectiveInput int, observationCount int) {
-	inputProfileTrackerStats.WithLabelValues("probe_input_tokens").Set(float64(probeInputTokens))
+func RecordInputProfileTrackerStats(probeInputWords int, probePrefixCacheScore float64, probeEffectiveInputWords int, observationCount int) {
+	inputProfileTrackerStats.WithLabelValues("probe_input_words").Set(float64(probeInputWords))
 	inputProfileTrackerStats.WithLabelValues("probe_prefix_cache_score").Set(probePrefixCacheScore)
-	inputProfileTrackerStats.WithLabelValues("probe_effective_input").Set(float64(probeEffectiveInput))
+	inputProfileTrackerStats.WithLabelValues("probe_effective_input_words").Set(float64(probeEffectiveInputWords))
 	inputProfileTrackerStats.WithLabelValues("observation_count").Set(float64(observationCount))
 }
 

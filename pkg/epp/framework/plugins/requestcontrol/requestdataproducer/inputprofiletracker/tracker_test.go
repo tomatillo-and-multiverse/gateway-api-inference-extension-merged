@@ -44,8 +44,8 @@ func TestTracker_ProbeProfile_Fallback(t *testing.T) {
 		MaxSamples: 100, Percentile: 90,
 	})
 
-	tokens, cache := tracker.ProbeProfile(512, 0.1)
-	require.Equal(t, 512, tokens)
+	words, cache := tracker.ProbeProfile(512, 0.1)
+	require.Equal(t, 512, words)
 	require.InDelta(t, 0.1, cache, 1e-6)
 }
 
@@ -56,16 +56,16 @@ func TestTracker_ProbeProfile_SelectsByEffectiveInput(t *testing.T) {
 	})
 
 	now := time.Now()
-	// Obs 1: 1000 tokens, 0.9 cache → effective = 100
-	// Obs 2: 200 tokens, 0.0 cache → effective = 200
-	// Obs 3: 500 tokens, 0.5 cache → effective = 250
+	// Obs 1: 1000 words, 0.9 cache → effective = 100
+	// Obs 2: 200 words, 0.0 cache → effective = 200
+	// Obs 3: 500 words, 0.5 cache → effective = 250
 	// Sorted: [100, 200, 250]. p50 index = 1 → obs 2.
-	tracker.record(observation{timestamp: now, inputTokens: 1000, prefixCacheScore: 0.9, effectiveInputTokens: 100})
-	tracker.record(observation{timestamp: now, inputTokens: 200, prefixCacheScore: 0.0, effectiveInputTokens: 200})
-	tracker.record(observation{timestamp: now, inputTokens: 500, prefixCacheScore: 0.5, effectiveInputTokens: 250})
+	tracker.record(observation{timestamp: now, inputWords: 1000, prefixCacheScore: 0.9, effectiveInputWords: 100})
+	tracker.record(observation{timestamp: now, inputWords: 200, prefixCacheScore: 0.0, effectiveInputWords: 200})
+	tracker.record(observation{timestamp: now, inputWords: 500, prefixCacheScore: 0.5, effectiveInputWords: 250})
 
-	tokens, cache := tracker.ProbeProfile(0, 0)
-	require.Equal(t, 200, tokens)
+	words, cache := tracker.ProbeProfile(0, 0)
+	require.Equal(t, 200, words)
 	require.InDelta(t, 0.0, cache, 1e-6)
 }
 
@@ -79,14 +79,14 @@ func TestTracker_ProbeProfile_P90(t *testing.T) {
 	for i := 1; i <= 100; i++ {
 		eff := i * 10
 		tracker.record(observation{
-			timestamp: now, inputTokens: eff * 2,
-			prefixCacheScore: 0.5, effectiveInputTokens: eff,
+			timestamp: now, inputWords: eff * 2,
+			prefixCacheScore: 0.5, effectiveInputWords: eff,
 		})
 	}
 
-	tokens, cache := tracker.ProbeProfile(0, 0)
-	// p90 index = 90 → effective=910 → inputTokens=1820, cache=0.5.
-	require.Equal(t, 1820, tokens)
+	words, cache := tracker.ProbeProfile(0, 0)
+	// p90 index = 90 → effective=910 → inputWords=1820, cache=0.5.
+	require.Equal(t, 1820, words)
 	require.InDelta(t, 0.5, cache, 1e-6)
 }
 
@@ -98,11 +98,11 @@ func TestTracker_WindowExpiry(t *testing.T) {
 
 	tracker.record(observation{
 		timestamp: time.Now().Add(-200 * time.Millisecond),
-		inputTokens: 999, prefixCacheScore: 0.5, effectiveInputTokens: 500,
+		inputWords: 999, prefixCacheScore: 0.5, effectiveInputWords: 500,
 	})
 
-	tokens, cache := tracker.ProbeProfile(42, 0.1)
-	require.Equal(t, 42, tokens)
+	words, cache := tracker.ProbeProfile(42, 0.1)
+	require.Equal(t, 42, words)
 	require.InDelta(t, 0.1, cache, 1e-6)
 }
 
@@ -115,15 +115,15 @@ func TestTracker_RingBuffer_Overflow(t *testing.T) {
 	now := time.Now()
 	for i := 1; i <= 8; i++ {
 		tracker.record(observation{
-			timestamp: now, inputTokens: i * 100,
-			prefixCacheScore: 0, effectiveInputTokens: i * 100,
+			timestamp: now, inputWords: i * 100,
+			prefixCacheScore: 0, effectiveInputWords: i * 100,
 		})
 	}
 
 	require.Equal(t, 5, len(tracker.observations))
-	tokens, _ := tracker.ProbeProfile(0, 0)
+	words, _ := tracker.ProbeProfile(0, 0)
 	// Buffer: [400,500,600,700,800]. p90 index=4 → 800.
-	require.Equal(t, 800, tokens)
+	require.Equal(t, 800, words)
 }
 
 func TestTracker_PrepareRequestData(t *testing.T) {
@@ -147,17 +147,17 @@ func TestTracker_PrepareRequestData(t *testing.T) {
 	require.NoError(t, err)
 
 	// Word count = 9, prefix cache = 3/10 = 0.3, effective = round(9 * 0.7) = 6.
-	tokens, cache := tracker.ProbeProfile(0, 0)
-	require.Equal(t, 9, tokens)
+	words, cache := tracker.ProbeProfile(0, 0)
+	require.Equal(t, 9, words)
 	require.InDelta(t, 0.3, cache, 1e-6)
 
 	// Verify attribute on endpoint.
 	raw, ok := ep.Get(attrinputprofile.InputProfileInfoKey)
 	require.True(t, ok)
 	info := raw.(*attrinputprofile.InputProfileInfo)
-	require.Equal(t, 9, info.InputTokens())
+	require.Equal(t, 9, info.InputWords())
 	require.InDelta(t, 0.3, info.PrefixCacheScore(), 1e-6)
-	require.Equal(t, 6, info.EffectiveInputTokens())
+	require.Equal(t, 6, info.EffectiveInputWords())
 }
 
 func TestTracker_PrepareRequestData_NoCacheInfo(t *testing.T) {
@@ -178,8 +178,8 @@ func TestTracker_PrepareRequestData_NoCacheInfo(t *testing.T) {
 	err := tracker.PrepareRequestData(context.Background(), request, []framework.Endpoint{ep})
 	require.NoError(t, err)
 
-	tokens, cache := tracker.ProbeProfile(0, 0)
-	require.Equal(t, 5, tokens)
+	words, cache := tracker.ProbeProfile(0, 0)
+	require.Equal(t, 5, words)
 	require.InDelta(t, 0.0, cache, 1e-6)
 }
 
@@ -193,19 +193,19 @@ func TestTracker_PrepareRequestData_NoBody(t *testing.T) {
 	require.NoError(t, err)
 
 	// No body → nothing recorded → fallback.
-	tokens, _ := tracker.ProbeProfile(42, 0)
-	require.Equal(t, 42, tokens)
+	words, _ := tracker.ProbeProfile(42, 0)
+	require.Equal(t, 42, words)
 }
 
-func TestCountInputTokens(t *testing.T) {
+func TestCountInputWords(t *testing.T) {
 	request := &framework.LLMRequest{
 		Body: &framework.LLMRequestBody{
 			Completions: &framework.CompletionsRequest{Prompt: "one two three"},
 		},
 	}
-	require.Equal(t, 3, countInputTokens(request))
-	require.Equal(t, 0, countInputTokens(&framework.LLMRequest{}))
-	require.Equal(t, 0, countInputTokens(nil))
+	require.Equal(t, 3, countInputWords(request))
+	require.Equal(t, 0, countInputWords(&framework.LLMRequest{}))
+	require.Equal(t, 0, countInputWords(nil))
 }
 
 func TestTracker_TypedName(t *testing.T) {

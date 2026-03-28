@@ -17,13 +17,13 @@ limitations under the License.
 // Package inputprofiletracker implements a PrepareDataPlugin that observes incoming request
 // characteristics and tracks the effective input per request:
 //
-//	effectiveInput = inputTokens * (1 - prefixCacheScore)
+//	effectiveInput = inputWords * (1 - prefixCacheScore)
 //
-// Input token count uses word count (len(strings.Fields(promptText))) to match the latency
-// predictor training server's heuristic. Do NOT change this without retraining.
+// Input word count uses len(strings.Fields(promptText)) to match the latency predictor
+// training server's heuristic. Do NOT change this without retraining.
 //
 // The tracker selects the observation at the configured percentile of effective input and
-// produces InputProfileInfo on endpoints, preserving both original (inputTokens,
+// produces InputProfileInfo on endpoints, preserving both original (inputWords,
 // prefixCacheScore) values so the sidecar model gets the features it was trained on.
 package inputprofiletracker
 
@@ -60,10 +60,10 @@ const (
 // InputProfileProvider is the interface consumed by downstream plugins (e.g., the latency
 // saturation detector) to get representative traffic characteristics for probing.
 type InputProfileProvider interface {
-	// ProbeProfile returns the representative (inputTokens, prefixCacheScore) pair
+	// ProbeProfile returns the representative (inputWords, prefixCacheScore) pair
 	// selected at the configured percentile of effective input.
 	// Returns the fallback values if no observations exist.
-	ProbeProfile(fallbackTokens int, fallbackCache float64) (inputTokens int, prefixCacheScore float64)
+	ProbeProfile(fallbackWords int, fallbackCache float64) (inputWords int, prefixCacheScore float64)
 }
 
 // Config holds the configuration for the input profile tracker.
@@ -73,7 +73,7 @@ type Config struct {
 	// MaxSamples caps the number of stored observations to bound memory.
 	// When full, oldest entries are evicted.
 	MaxSamples int `json:"maxSamples"`
-	// Percentile (0-100) used for effective input token ranking (e.g., 90 = p90).
+	// Percentile (0-100) used for effective input word ranking (e.g., 90 = p90).
 	Percentile int `json:"percentile"`
 
 	// windowDuration is the parsed duration from WindowDuration.
@@ -82,14 +82,14 @@ type Config struct {
 
 type observation struct {
 	timestamp            time.Time
-	inputTokens          int
+	inputWords           int
 	prefixCacheScore     float64
-	effectiveInputTokens int // inputTokens * (1 - prefixCacheScore)
+	effectiveInputWords  int // inputWords * (1 - prefixCacheScore)
 }
 
 var _ requestcontrol.PrepareDataPlugin = &Tracker{}
 
-// Tracker observes effective input token counts from incoming requests.
+// Tracker observes effective input word counts from incoming requests.
 type Tracker struct {
 	config Config
 
@@ -140,14 +140,14 @@ func (t *Tracker) TypedName() fwkplugin.TypedName {
 	}
 }
 
-// PrepareRequestData computes the input token count (word count) from the request,
+// PrepareRequestData computes the input word count from the request,
 // reads prefix cache scores from endpoints, computes effective input, and produces
 // InputProfileInfo on each endpoint.
 func (t *Tracker) PrepareRequestData(ctx context.Context, request *framework.LLMRequest, endpoints []framework.Endpoint) error {
 	logger := log.FromContext(ctx)
 
-	inputTokens := countInputTokens(request)
-	if inputTokens <= 0 {
+	inputWords := countInputWords(request)
+	if inputWords <= 0 {
 		return nil
 	}
 
@@ -155,31 +155,31 @@ func (t *Tracker) PrepareRequestData(ctx context.Context, request *framework.LLM
 	prefixCacheScore := meanPrefixCacheScore(endpoints)
 
 	// Effective input captures both request size and cache savings in one number.
-	effectiveInput := int(math.Round(float64(inputTokens) * (1.0 - prefixCacheScore)))
+	effectiveInput := int(math.Round(float64(inputWords) * (1.0 - prefixCacheScore)))
 	if effectiveInput < 1 {
 		effectiveInput = 1
 	}
 
 	t.record(observation{
-		timestamp:            time.Now(),
-		inputTokens:          inputTokens,
-		prefixCacheScore:     prefixCacheScore,
-		effectiveInputTokens: effectiveInput,
+		timestamp:           time.Now(),
+		inputWords:          inputWords,
+		prefixCacheScore:    prefixCacheScore,
+		effectiveInputWords: effectiveInput,
 	})
 
 	// Produce the current profile snapshot as an attribute on every endpoint.
-	probeTokens, probeCache := t.ProbeProfile(0, 0)
-	if probeTokens > 0 {
-		probeEffective := int(math.Round(float64(probeTokens) * (1.0 - probeCache)))
-		profileInfo := attrinputprofile.NewInputProfileInfo(probeTokens, probeCache, probeEffective)
+	probeWords, probeCache := t.ProbeProfile(0, 0)
+	if probeWords > 0 {
+		probeEffective := int(math.Round(float64(probeWords) * (1.0 - probeCache)))
+		profileInfo := attrinputprofile.NewInputProfileInfo(probeWords, probeCache, probeEffective)
 		for _, ep := range endpoints {
 			ep.Put(attrinputprofile.InputProfileInfoKey, profileInfo)
 		}
-		eppmetrics.RecordInputProfileTrackerStats(probeTokens, probeCache, probeEffective, t.observationCount())
+		eppmetrics.RecordInputProfileTrackerStats(probeWords, probeCache, probeEffective, t.observationCount())
 	}
 
 	logger.V(logutil.TRACE).Info("Input profile observation",
-		"inputTokens", inputTokens,
+		"inputWords", inputWords,
 		"prefixCacheScore", prefixCacheScore,
 		"effectiveInput", effectiveInput)
 
@@ -198,24 +198,24 @@ func (t *Tracker) Consumes() map[string]any {
 	return map[string]any{attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// ProbeProfile returns the (inputTokens, prefixCacheScore) pair from the observation at
+// ProbeProfile returns the (inputWords, prefixCacheScore) pair from the observation at
 // the configured percentile of effective input.
-func (t *Tracker) ProbeProfile(fallbackTokens int, fallbackCache float64) (int, float64) {
+func (t *Tracker) ProbeProfile(fallbackWords int, fallbackCache float64) (int, float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	valid := t.validObservations()
 	if len(valid) == 0 {
-		return fallbackTokens, fallbackCache
+		return fallbackWords, fallbackCache
 	}
 
-	// Sort by effective input tokens.
+	// Sort by effective input words.
 	sort.Slice(valid, func(i, j int) bool {
-		return valid[i].effectiveInputTokens < valid[j].effectiveInputTokens
+		return valid[i].effectiveInputWords < valid[j].effectiveInputWords
 	})
 
 	idx := percentileIndex(len(valid), t.config.Percentile)
-	return valid[idx].inputTokens, valid[idx].prefixCacheScore
+	return valid[idx].inputWords, valid[idx].prefixCacheScore
 }
 
 // observationCount returns the number of valid (non-expired) observations.
@@ -250,10 +250,10 @@ func (t *Tracker) validObservations() []observation {
 	return valid
 }
 
-// countInputTokens computes the input token count using word count.
+// countInputWords computes the input word count from the request prompt.
 // This MUST match the training server's heuristic: len(strings.Fields(promptText)).
 // Do NOT change to actual token IDs or byte-based estimates without retraining.
-func countInputTokens(request *framework.LLMRequest) int {
+func countInputWords(request *framework.LLMRequest) int {
 	if request == nil || request.Body == nil {
 		return 0
 	}
