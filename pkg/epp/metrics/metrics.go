@@ -452,6 +452,24 @@ var (
 		[]string{"inference_pool"},
 	)
 
+	latencyDetectorEndpointSaturation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: inferenceExtension,
+			Name:      "latency_detector_endpoint_saturation",
+			Help:      metricsutil.HelpMsgWithStability("Predicted saturation per endpoint from the latency detector probe (predicted_latency / SLO).", compbasemetrics.ALPHA),
+		},
+		[]string{"endpoint"},
+	)
+
+	latencyDetectorPoolSaturation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: inferenceExtension,
+			Name:      "latency_detector_pool_saturation",
+			Help:      metricsutil.HelpMsgWithStability("Aggregate predicted saturation from the latency detector probe, averaged across all endpoints.", compbasemetrics.ALPHA),
+		},
+		[]string{},
+	)
+
 	inputProfileTrackerStats = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: inferenceExtension,
@@ -519,6 +537,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(flowControlQueueBytes)
 		metrics.Registry.MustRegister(flowControlPoolSaturation)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
+		metrics.Registry.MustRegister(latencyDetectorEndpointSaturation)
+		metrics.Registry.MustRegister(latencyDetectorPoolSaturation)
 		metrics.Registry.MustRegister(inputProfileTrackerStats)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		for _, collector := range customCollectors {
@@ -570,6 +590,8 @@ func Reset() {
 	flowControlQueueBytes.Reset()
 	flowControlPoolSaturation.Reset()
 	flowControlRequestEnqueueDuration.Reset()
+	latencyDetectorEndpointSaturation.Reset()
+	latencyDetectorPoolSaturation.Reset()
 	inputProfileTrackerStats.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 }
@@ -910,6 +932,16 @@ func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 }
 
 // RecordInputProfileTrackerStats records the current input profile tracker stats.
+// RecordLatencyDetectorEndpointSaturation records the predicted saturation for a single endpoint.
+func RecordLatencyDetectorEndpointSaturation(endpoint string, saturation float64) {
+	latencyDetectorEndpointSaturation.WithLabelValues(endpoint).Set(saturation)
+}
+
+// RecordLatencyDetectorPoolSaturation records the aggregate predicted saturation from the probe.
+func RecordLatencyDetectorPoolSaturation(saturation float64) {
+	latencyDetectorPoolSaturation.WithLabelValues().Set(saturation)
+}
+
 func RecordInputProfileTrackerStats(probeInputWords int, probePrefixCacheScore float64, probeEffectiveInputWords int, observationCount int) {
 	inputProfileTrackerStats.WithLabelValues("probe_input_words").Set(float64(probeInputWords))
 	inputProfileTrackerStats.WithLabelValues("probe_prefix_cache_score").Set(probePrefixCacheScore)
