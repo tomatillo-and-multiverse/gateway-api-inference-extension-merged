@@ -136,6 +136,7 @@ data:
         insecureSkipVerify: true
     - type: core-metrics-extractor
     - type: prefix-cache-scorer
+    - type: request-input-producer
     - type: latency-predictor-producer
     - type: latency-scorer
     - type: latency-admission
@@ -152,6 +153,7 @@ data:
     schedulingProfiles:
     - name: default
       plugins:
+      - pluginRef: request-input-producer
       - pluginRef: input-profile-tracker
       - pluginRef: latency-predictor-producer
       - pluginRef: latency-scorer
@@ -182,6 +184,7 @@ data:
         insecureSkipVerify: true
     - type: core-metrics-extractor
     - type: prefix-cache-scorer
+    - type: request-input-producer
     - type: latency-predictor-producer
       parameters:
         streamingMode: true
@@ -195,13 +198,13 @@ data:
       parameters:
         ttftSLOMs: 200
         tpotSLOMs: 50
-        probeInputTokenLength: 1024
         probeInterval: "10s"
         headroom: 0.2
     - type: weighted-random-picker
     schedulingProfiles:
     - name: default
       plugins:
+      - pluginRef: request-input-producer
       - pluginRef: input-profile-tracker
       - pluginRef: latency-predictor-producer
       - pluginRef: latency-scorer
