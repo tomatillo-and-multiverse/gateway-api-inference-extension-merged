@@ -24,7 +24,7 @@ import (
 // Default configuration values.
 const (
 	// DefaultE2ESLOMs is the default E2E latency SLO in milliseconds.
-	DefaultE2ESLOMs = 200.0
+	DefaultE2ESLOMs = 60000.0
 	// DefaultProbeInputWords is the fallback input word count for probes.
 	// Overridden by input-profile-tracker when available.
 	DefaultProbeInputWords = 512
