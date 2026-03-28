@@ -32,7 +32,7 @@ const (
 	// 0 represents the worst case (no cache reuse).
 	DefaultProbePrefixCacheScore = 0.0
 	// DefaultProbeInterval is how often the background goroutine probes endpoints.
-	DefaultProbeInterval = 10 * time.Second
+	DefaultProbeInterval = "10s"
 	// DefaultHeadroom is the burst allowance fraction for the Filter (0%).
 	DefaultHeadroom = 0.0
 )
@@ -70,8 +70,11 @@ type Config struct {
 	// 0 = worst case (no cache), 1 = best case (full cache hit).
 	ProbePrefixCacheScore float64 `json:"probePrefixCacheScore"`
 
-	// ProbeInterval controls how often the background goroutine probes all endpoints.
-	ProbeInterval time.Duration `json:"probeInterval"`
+	// ProbeInterval controls how often the background goroutine probes all endpoints (e.g., "10s").
+	ProbeInterval string `json:"probeInterval"`
+
+	// probeInterval is the parsed duration from ProbeInterval.
+	probeInterval time.Duration
 
 	// Headroom defines the allowed burst capacity above SLO for the Filter,
 	// expressed as a fraction in [0.0, 1.0].
@@ -93,7 +96,7 @@ func (c *Config) activeTTFTSLO() float64 {
 	return c.E2ESLOMs
 }
 
-// validate checks that the config is internally consistent.
+// validate checks that the config is internally consistent and parses durations.
 func (c *Config) validate() error {
 	if c.E2ESLOMs > 0 && c.TTFTSLOMs > 0 {
 		return fmt.Errorf("e2eSLOMs and ttftSLOMs are mutually exclusive; set one or the other")
@@ -103,6 +106,13 @@ func (c *Config) validate() error {
 	}
 	if c.TPOTSLOMs > 0 && !c.isStreaming() {
 		return fmt.Errorf("tpotSLOMs requires ttftSLOMs (streaming mode); set ttftSLOMs instead of e2eSLOMs")
+	}
+	if c.ProbeInterval != "" {
+		dur, err := time.ParseDuration(c.ProbeInterval)
+		if err != nil {
+			return fmt.Errorf("invalid probeInterval %q: %w", c.ProbeInterval, err)
+		}
+		c.probeInterval = dur
 	}
 	return nil
 }

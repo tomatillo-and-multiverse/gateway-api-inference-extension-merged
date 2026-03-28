@@ -1,9 +1,9 @@
 inferenceExtension:
   replicas: 1
   image:
-    name: epp
-    hub: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension
-    tag: main
+    name: epp-saturation-detector
+    hub: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo
+    tag: latest
     pullPolicy: Always
   extProcPort: 9002
   failureMode: "FailOpen"
@@ -75,7 +75,7 @@ inferenceExtension:
     interval: "10s"
     # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
     prometheus:
-      enabled: false
+      enabled: true
       auth:
         enabled: true
         # Service account token secret for authentication
@@ -92,7 +92,7 @@ inferenceExtension:
   # Latency Predictor Configuration
   latencyPredictor:
     # common latencyPredictor setting exists in config/charts/inference-extension/values.yaml
-    enabled: false
+    enabled: true
 
   # Metrics DataSource Configuration
   # These values configure how the EPP scrapes metrics from model server pods.
@@ -121,7 +121,7 @@ inferencePool:
 
 # Options: ["gke", "istio", "none"]
 provider:
-  name: none
+  name: gke
 
   # GKE-specific configuration.
   # This block is only used if name is "gke".

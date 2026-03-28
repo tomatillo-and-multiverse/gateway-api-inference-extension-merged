@@ -38,7 +38,7 @@ Latency Predictor Sidecar Containers
     {{- toYaml .Values.inferenceExtension.latencyPredictor.trainingServer.resources | nindent 4 }}
   envFrom:
   - configMapRef:
-      name: {{ include "gateway-api-inference-extension.name" . }}-latency-predictor-training
+      name: {{ include "gateway-api-inference-extension.name" . }}-latency-predictor-producer-training
   env:
   - name: POD_NAME
     valueFrom:
@@ -76,7 +76,7 @@ Latency Predictor Sidecar Containers
     {{- toYaml $.Values.inferenceExtension.latencyPredictor.predictionServers.resources | nindent 4 }}
   envFrom:
   - configMapRef:
-      name: {{ include "gateway-api-inference-extension.name" $ }}-latency-predictor-prediction
+      name: {{ include "gateway-api-inference-extension.name" $ }}-latency-predictor-producer-prediction
   env:
   - name: PREDICT_PORT
     value: "{{ add $.Values.inferenceExtension.latencyPredictor.predictionServers.startPort $i }}"

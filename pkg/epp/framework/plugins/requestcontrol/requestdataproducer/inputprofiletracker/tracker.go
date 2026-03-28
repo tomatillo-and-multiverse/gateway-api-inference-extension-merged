@@ -48,7 +48,7 @@ const (
 	// InputProfileTrackerType is the unique identifier for this plugin.
 	InputProfileTrackerType = "input-profile-tracker"
 
-	DefaultWindowDuration = 5 * time.Minute
+	DefaultWindowDuration = "5m"
 	DefaultMaxSamples     = 10000
 	DefaultPercentile     = 90
 )
@@ -64,13 +64,16 @@ type InputProfileProvider interface {
 
 // Config holds the configuration for the input profile tracker.
 type Config struct {
-	// WindowDuration is how far back observations are kept.
-	WindowDuration time.Duration `json:"windowDuration"`
+	// WindowDuration is how far back observations are kept (e.g., "5m", "300s").
+	WindowDuration string `json:"windowDuration"`
 	// MaxSamples caps the number of stored observations to bound memory.
 	// When full, oldest entries are evicted.
 	MaxSamples int `json:"maxSamples"`
 	// Percentile (0-100) used for effective input token ranking (e.g., 90 = p90).
 	Percentile int `json:"percentile"`
+
+	// parsed is the resolved duration from WindowDuration.
+	windowDuration time.Duration
 }
 
 type observation struct {
@@ -103,6 +106,11 @@ func TrackerFactory(_ string, params json.RawMessage, _ fwkplugin.Handle) (fwkpl
 			return nil, fmt.Errorf("failed to unmarshal input profile tracker config: %w", err)
 		}
 	}
+	dur, err := time.ParseDuration(config.WindowDuration)
+	if err != nil {
+		return nil, fmt.Errorf("invalid windowDuration %q: %w", config.WindowDuration, err)
+	}
+	config.windowDuration = dur
 	if config.Percentile < 0 || config.Percentile > 100 {
 		return nil, fmt.Errorf("percentile must be 0-100, got %d", config.Percentile)
 	}
@@ -223,7 +231,7 @@ func (t *Tracker) record(obs observation) {
 
 // validObservations returns observations within the time window. Must be called with mu held.
 func (t *Tracker) validObservations() []observation {
-	cutoff := time.Now().Add(-t.config.WindowDuration)
+	cutoff := time.Now().Add(-t.config.windowDuration)
 	valid := make([]observation, 0, len(t.observations))
 	for _, o := range t.observations {
 		if o.timestamp.After(cutoff) {

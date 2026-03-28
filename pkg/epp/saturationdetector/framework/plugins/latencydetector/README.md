@@ -145,8 +145,7 @@ data:
         percentile: 90
     - type: latency-detector
       parameters:
-        e2eSLOMs: 200
-        probeInputTokenLength: 512
+        e2eSLOMs: 1000
         probeInterval: "10s"
         headroom: 0.1
     - type: weighted-random-picker

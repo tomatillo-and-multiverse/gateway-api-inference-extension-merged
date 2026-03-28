@@ -46,7 +46,7 @@ func setRequestInput(ep framework.Endpoint, tokenCount int) {
 
 func TestTracker_ProbeProfile_Fallback(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 5 * time.Minute,
+		WindowDuration: "5m", windowDuration: 5 * time.Minute,
 		MaxSamples:     100,
 		Percentile:     90,
 	})
@@ -59,7 +59,7 @@ func TestTracker_ProbeProfile_Fallback(t *testing.T) {
 
 func TestTracker_ProbeProfile_SelectsByEffectiveInput(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 5 * time.Minute,
+		WindowDuration: "5m", windowDuration: 5 * time.Minute,
 		MaxSamples:     100,
 		Percentile:     50, // Median for easier reasoning.
 	})
@@ -82,7 +82,7 @@ func TestTracker_ProbeProfile_SelectsByEffectiveInput(t *testing.T) {
 
 func TestTracker_ProbeProfile_P90(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 5 * time.Minute,
+		WindowDuration: "5m", windowDuration: 5 * time.Minute,
 		MaxSamples:     200,
 		Percentile:     90,
 	})
@@ -107,7 +107,7 @@ func TestTracker_ProbeProfile_P90(t *testing.T) {
 
 func TestTracker_WindowExpiry(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 100 * time.Millisecond,
+		WindowDuration: "100ms", windowDuration: 100 * time.Millisecond,
 		MaxSamples:     100,
 		Percentile:     90,
 	})
@@ -128,7 +128,7 @@ func TestTracker_WindowExpiry(t *testing.T) {
 
 func TestTracker_RingBuffer_Overflow(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 5 * time.Minute,
+		WindowDuration: "5m", windowDuration: 5 * time.Minute,
 		MaxSamples:     5,
 		Percentile:     90,
 	})
@@ -153,7 +153,7 @@ func TestTracker_RingBuffer_Overflow(t *testing.T) {
 
 func TestTracker_PrepareRequestData(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 5 * time.Minute,
+		WindowDuration: "5m", windowDuration: 5 * time.Minute,
 		MaxSamples:     100,
 		Percentile:     50,
 	})
@@ -182,7 +182,7 @@ func TestTracker_PrepareRequestData(t *testing.T) {
 
 func TestTracker_PrepareRequestData_NoCacheInfo(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 5 * time.Minute,
+		WindowDuration: "5m", windowDuration: 5 * time.Minute,
 		MaxSamples:     100,
 		Percentile:     50,
 	})
@@ -201,7 +201,7 @@ func TestTracker_PrepareRequestData_NoCacheInfo(t *testing.T) {
 
 func TestTracker_PrepareRequestData_NoInputInfo(t *testing.T) {
 	tracker := NewTracker(Config{
-		WindowDuration: 5 * time.Minute,
+		WindowDuration: "5m", windowDuration: 5 * time.Minute,
 		MaxSamples:     100,
 		Percentile:     50,
 	})

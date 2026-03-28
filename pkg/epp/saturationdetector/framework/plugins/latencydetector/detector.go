@@ -164,14 +164,14 @@ func NewDetector(config Config, predictor latencypredictor.PredictorInterface, p
 			"tpotSLOMs", config.TPOTSLOMs,
 			"probeInputTokenLength", config.ProbeInputTokenLength,
 			"probePrefixCacheScore", config.ProbePrefixCacheScore,
-			"probeInterval", config.ProbeInterval.String(),
+			"probeInterval", config.ProbeInterval,
 			"headroom", config.Headroom)
 	} else {
 		logger.V(logutil.DEFAULT).Info("Creating new LatencySaturationDetector (non-streaming, E2E)",
 			"e2eSLOMs", config.E2ESLOMs,
 			"probeInputTokenLength", config.ProbeInputTokenLength,
 			"probePrefixCacheScore", config.ProbePrefixCacheScore,
-			"probeInterval", config.ProbeInterval.String(),
+			"probeInterval", config.ProbeInterval,
 			"headroom", config.Headroom)
 	}
 
@@ -279,7 +279,7 @@ func (d *Detector) Filter(
 
 // probeLoop runs the background probe cycle on the configured interval.
 func (d *Detector) probeLoop(ctx context.Context) {
-	ticker := time.NewTicker(d.config.ProbeInterval)
+	ticker := time.NewTicker(d.config.probeInterval)
 	defer ticker.Stop()
 
 	for {

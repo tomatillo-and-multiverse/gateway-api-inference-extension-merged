@@ -459,7 +459,8 @@ func TestDetector_ProbeLoop_Integration(t *testing.T) {
 		config: Config{
 			E2ESLOMs:              200,
 			ProbeInputTokenLength: 512,
-			ProbeInterval:         50 * time.Millisecond, // Fast for testing.
+			ProbeInterval:         "50ms",
+			probeInterval:         50 * time.Millisecond, // Fast for testing.
 		},
 		predictor:           predictor,
 		logger:              logr.Discard(),
