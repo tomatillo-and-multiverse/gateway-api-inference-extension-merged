@@ -131,6 +131,7 @@ type Runner struct {
 	customCollectors     []prometheus.Collector
 	parser               fwkrh.Parser
 	dlRuntime            *datalayer.Runtime
+	pluginHandle         fwkplugin.Handle
 
 	testOverrideSkipNameValidation bool
 }
@@ -336,7 +337,20 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
-	saturationDetector := utilizationdetector.NewDetector(eppConfig.SaturationDetectorConfig, setupLog)
+	// Use the latency-detector plugin as the saturation detector if configured,
+	// otherwise fall back to the utilization detector.
+	var saturationDetector contracts.SaturationDetector
+	if r.pluginHandle != nil {
+		if rawPlugin := r.pluginHandle.Plugin(latencydetector.LatencyDetectorType); rawPlugin != nil {
+			if ld, ok := rawPlugin.(contracts.SaturationDetector); ok {
+				saturationDetector = ld
+				setupLog.Info("Using latency-detector as saturation detector")
+			}
+		}
+	}
+	if saturationDetector == nil {
+		saturationDetector = utilizationdetector.NewDetector(eppConfig.SaturationDetectorConfig, setupLog)
+	}
 
 	// --- Admission Control Initialization ---
 	var admissionController requestcontrol.AdmissionController
@@ -553,6 +567,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	}
 
 	r.schedulerConfig = cfg.SchedulerConfig
+	r.pluginHandle = handle
 
 	// Add requestControl plugins
 	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
