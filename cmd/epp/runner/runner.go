@@ -71,7 +71,12 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo"
+	latencyproducer "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/requestcontrol/requestdataproducer/predictedlatency"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/picker"
+	latencyscorer "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/scorer/latency"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/profile"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/plugins/scheduling/scorer/loraaffinity"
@@ -460,8 +465,14 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(ordering.EDFOrderingPolicyType, ordering.EDFOrderingPolicyFactory)
 	fwkplugin.Register(ordering.SLODeadlineOrderingPolicyType, ordering.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
-	// Latency predictor plugins
+	// Latency predictor and admission plugins (old monolith + new decomposed)
 	fwkplugin.Register(predictedlatency.PredictedLatencyPluginType, predictedlatency.PredictedLatencyFactory)
+	fwkplugin.Register(latencyproducer.LatencyDataProviderPluginType, latencyproducer.PredictedLatencyFactory)
+	fwkplugin.Register(latencyslo.LatencyAdmissionPluginType, latencyslo.LatencyAdmissionFactory)
+	// Latency scoring and filtering plugins
+	fwkplugin.Register(prefixcacheaffinity.PluginType, prefixcacheaffinity.Factory)
+	fwkplugin.Register(sloheadroomtier.PluginType, sloheadroomtier.Factory)
+	fwkplugin.Register(latencyscorer.LatencyScorerType, latencyscorer.Factory)
 	// register filter for test purpose only (used in conformance tests)
 	fwkplugin.Register(testfilter.HeaderBasedTestingFilterType, testfilter.HeaderBasedTestingFilterFactory)
 	// register response received plugin for test purpose only (used in conformance tests)
