@@ -21,10 +21,23 @@ data:
     {{- if .Values.inferenceExtension.latencyPredictor.enabled }}
     - type: predicted-latency-producer
     - type: prefix-cache-affinity-filter
-      parameters:
-        affinityThreshold: 0.80
     - type: latency-scorer
     - type: weighted-random-picker
+    ## ── Optional SLO-aware plugins ──────────────────────────────────────
+    ## Uncomment the plugins below to enable strict SLO enforcement.
+    ## Without these, the latency-scorer still differentiates endpoints by
+    ## headroom — but all endpoints remain candidates (no tier gating or
+    ## admission rejection). This is the recommended starting point.
+    ##
+    ## slo-headroom-tier-filter: splits endpoints into positive (meets SLO)
+    ## and negative (violates SLO) tiers. Probabilistically explores the
+    ## negative tier to let recovering pods get traffic.
+    # - type: slo-headroom-tier-filter
+    ##
+    ## latency-slo-admitter: rejects sheddable requests when no endpoint
+    ## can meet SLO constraints. Requires SLO headers (x-slo-ttft-ms,
+    ## x-slo-tpot-ms) on requests.
+    # - type: latency-slo-admitter
     {{- end }}
     schedulingProfiles:
     {{- if .Values.inferenceExtension.latencyPredictor.enabled }}
@@ -32,6 +45,10 @@ data:
       plugins:
       - pluginRef: predicted-latency-producer
       - pluginRef: prefix-cache-affinity-filter
+      ## To enable SLO-aware tier gating, uncomment the line below.
+      ## It splits endpoints into positive/negative headroom tiers
+      ## before scoring, with epsilon-explore to recover overloaded pods.
+      # - pluginRef: slo-headroom-tier-filter
       - pluginRef: latency-scorer
         weight: 1
       - pluginRef: weighted-random-picker
