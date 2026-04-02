@@ -22,7 +22,7 @@ data:
     - type: predicted-latency-producer
     - type: prefix-cache-affinity-filter
       parameters:
-        tau: 0.80
+        affinityThreshold: 0.80
     - type: latency-scorer
     - type: weighted-random-picker
     {{- end }}

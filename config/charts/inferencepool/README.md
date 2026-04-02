@@ -142,10 +142,10 @@ The behavior of the latency-based router can be fine-tuned using the configurati
 | `compositeKVWeight`              | The weight for KV cache in the composite score.                                                         | `1.0`       |
 | `compositeQueueWeight`           | The weight for queue size in the composite score.                                                       | `1.0`       |
 | `compositePrefixWeight`          | The weight for prefix cache in the composite score.                                                     | `1.0`       |
-| `epsilonExploreSticky`           | Exploration factor for sticky sessions.                                                                 | `0.01`      |
+| `explorationProbability`         | Exploration probability for prefix cache affinity filter.                                               | `0.01`      |
 | `epsilonExploreNeg`              | Exploration factor for negative headroom.                                                               | `0.01`      |
-| `affinityGateTau`                | Affinity gate threshold.                                                                                | `0.80`      |
-| `affinityGateTauGlobal`          | Global affinity gate threshold.                                                                         | `0.99`      |
+| `affinityThreshold`              | Prefix cache affinity threshold for stickiness.                                                         | `0.80`      |
+| `affinityThresholdGlobal`        | Global prefix cache affinity threshold.                                                                 | `0.99`      |
 | `selectionMode`                  | The mode for selection (e.g., "linear").                                                                | `linear`    |
 
 **Note:** Enabling SLO-aware routing also exposes a number of Prometheus metrics for monitoring the feature, including actual vs. predicted latency, SLO violations, and more.
