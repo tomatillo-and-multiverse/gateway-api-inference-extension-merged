@@ -478,6 +478,24 @@ var (
 		},
 		[]string{"stat"},
 	)
+
+	poolTTFTSLOThreshold = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: inferencePoolComponent,
+			Name:      "ttft_slo_threshold",
+			Help:      metricsutil.HelpMsgWithStability("The pool-level TTFT SLO threshold in use.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
+
+	poolTPOTSLOThreshold = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: inferencePoolComponent,
+			Name:      "tpot_slo_threshold",
+			Help:      metricsutil.HelpMsgWithStability("The pool-level TPOT SLO threshold in use.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
 )
 
 // --- Inference Model Rewrite Metrics ---
@@ -540,6 +558,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(latencyDetectorEndpointSaturation)
 		metrics.Registry.MustRegister(latencyDetectorPoolSaturation)
 		metrics.Registry.MustRegister(inputProfileTrackerStats)
+		metrics.Registry.MustRegister(poolTTFTSLOThreshold)
+		metrics.Registry.MustRegister(poolTPOTSLOThreshold)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -593,6 +613,8 @@ func Reset() {
 	latencyDetectorEndpointSaturation.Reset()
 	latencyDetectorPoolSaturation.Reset()
 	inputProfileTrackerStats.Reset()
+	poolTTFTSLOThreshold.Reset()
+	poolTPOTSLOThreshold.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 }
 
@@ -949,16 +971,14 @@ func RecordInputProfileTrackerStats(probeInputWords int, probePrefixCacheScore f
 	inputProfileTrackerStats.WithLabelValues("observation_count").Set(float64(observationCount))
 }
 
-// SetTTFTSLOThreshold sets the TTFT SLO threshold for a model.
-// This allows dynamic threshold management and makes the threshold visible in metrics.
-func SetTTFTSLOThreshold(modelName, targetModelName string, threshold float64) {
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOThreshold).Set(threshold)
+// SetPoolTTFTSLOThreshold sets the pool-level TTFT SLO threshold.
+func SetPoolTTFTSLOThreshold(poolName string, threshold float64) {
+	poolTTFTSLOThreshold.WithLabelValues(poolName).Set(threshold)
 }
 
-// SetTPOTSLOThreshold sets the TPOT SLO threshold for a model.
-// This allows dynamic threshold management and makes the threshold visible in metrics.
-func SetTPOTSLOThreshold(modelName, targetModelName string, threshold float64) {
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOThreshold).Set(threshold)
+// SetPoolTPOTSLOThreshold sets the pool-level TPOT SLO threshold.
+func SetPoolTPOTSLOThreshold(poolName string, threshold float64) {
+	poolTPOTSLOThreshold.WithLabelValues(poolName).Set(threshold)
 }
 
 // RecordInferenceModelRewriteDecision records the routing decision for InferenceModelRewrite.
