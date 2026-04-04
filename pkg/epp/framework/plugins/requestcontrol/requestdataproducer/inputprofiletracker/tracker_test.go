@@ -135,7 +135,7 @@ func TestTracker_PrepareRequestData(t *testing.T) {
 	request := &framework.LLMRequest{
 		Body: &framework.LLMRequestBody{
 			Completions: &framework.CompletionsRequest{
-				Prompt: "the quick brown fox jumps over the lazy dog",
+				Prompt: framework.Prompt{Raw: "the quick brown fox jumps over the lazy dog"},
 			},
 		},
 	}
@@ -169,7 +169,7 @@ func TestTracker_PrepareRequestData_NoCacheInfo(t *testing.T) {
 	request := &framework.LLMRequest{
 		Body: &framework.LLMRequestBody{
 			Completions: &framework.CompletionsRequest{
-				Prompt: "one two three four five",
+				Prompt: framework.Prompt{Raw: "one two three four five"},
 			},
 		},
 	}
@@ -200,7 +200,7 @@ func TestTracker_PrepareRequestData_NoBody(t *testing.T) {
 func TestCountInputWords(t *testing.T) {
 	request := &framework.LLMRequest{
 		Body: &framework.LLMRequestBody{
-			Completions: &framework.CompletionsRequest{Prompt: "one two three"},
+			Completions: &framework.CompletionsRequest{Prompt: framework.Prompt{Raw: "one two three"}},
 		},
 	}
 	require.Equal(t, 3, countInputWords(request))
