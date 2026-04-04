@@ -1,9 +1,9 @@
 inferenceExtension:
   replicas: 1
   image:
-    registry: us-central1-docker.pkg.dev/k8s-staging-images
-    repository: gateway-api-inference-extension/epp
-    tag: main
+    registry: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo
+    repository: epp-saturation-detector-v2
+    tag: latest
     pullPolicy: Always
   extProcPort: 9002
   failureMode: "FailOpen"
